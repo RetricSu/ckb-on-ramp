@@ -1,0 +1,16 @@
+{
+  "name": "ckb-on-ramp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "concurrently -n web,api -c blue,green \"npm run dev -w @ckb-on-ramp/web\" \"npm run dev -w @ckb-on-ramp/api\"",
+    "build": "npm run build -w @ckb-on-ramp/contracts && npm run build -w @ckb-on-ramp/api && npm run build -w @ckb-on-ramp/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "postinstall": "npm run vendor:fiber -w @ckb-on-ramp/web"
+  },
+  "engines": { "node": ">=22" },
+  "devDependencies": { "concurrently": "9.2.4" }
+}

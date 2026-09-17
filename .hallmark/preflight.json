@@ -1,0 +1,10 @@
+{
+  "date": "2026-09-17",
+  "framework": "greenfield",
+  "fontStack": null,
+  "palette": null,
+  "motion": "motion-cut",
+  "spacing": null,
+  "preserve": [],
+  "introduce": ["tokens", "workbench macrostructure", "interaction states", "responsive rules"]
+}

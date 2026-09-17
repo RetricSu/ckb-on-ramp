@@ -1,0 +1,31 @@
+{
+  "name": "@ckb-on-ramp/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "vendor:fiber": "mkdir -p public/vendor && esbuild node_modules/@nervosnetwork/fiber-js/dist/index.js --bundle --format=esm --platform=browser --minify --target=esnext --outfile=public/vendor/fiber-js.js"
+  },
+  "dependencies": {
+    "@ckb-on-ramp/contracts": "0.1.0",
+    "@fiber-pay/react": "0.3.2",
+    "@fontsource/ibm-plex-sans": "5.3.0",
+    "@fontsource/jetbrains-mono": "5.3.0",
+    "@fontsource/space-grotesk": "5.3.0",
+    "@nervosnetwork/fiber-js": "0.9.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "@vitejs/plugin-react": "5.0.4",
+    "esbuild": "0.25.10",
+    "typescript": "5.9.2",
+    "vite": "7.3.6",
+    "vite-plugin-cross-origin-isolation": "0.1.6"
+  }
+}
