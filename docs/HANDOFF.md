@@ -5,16 +5,20 @@
 ## 当前交付状态
 
 仓库已经有一个可运行的 mock vertical slice：浏览器 Fiber WASM 节点、报价、Fiber SHA-256 invoice、后端 CCH adapter、LND BOLT11 展示、订单轮询和恢复错误态。
+已完成 `/api/node-info` 端点与前端 `connect_peer` 连通链路，并实现了前端浏览器 Fiber 节点对入向通道要约的 0-CKB 自动接受轮询器（`funding_amount: '0x0'`，绝不触发 99 CKB auto-accept）。
 
-当前实现仍然只应以 **mock scaffold** 交付。`CCH_MODE=rpc` 的 bootstrap 继续 fail-closed，真实资金路径没有被宣称完成。
+**实测关键阻塞与边界保留**：
+经 live 实测验证，运行中的测试网 FNN 实例（`127.0.0.1:18327`）不存在 `send_ckb` 或 `send_transaction` RPC 方法（调用直接返回 `Method not found`）；`fiber-pay` 钱包 CLI/API 仅支持地址与余额查询（address + balance only）。为恪守私钥与安全边界，**绝不向 API 后端添加运营方私钥（`OPERATOR_*`）**。因此，运营方无偿赠予 CKB（Scheme B Phase-1 gift transfer）在缺乏 FNN 链上转账 RPC 的情况下明确保持 **unwired**，`CCH_MODE=rpc` 的 bootstrap 继续 **fail-closed（HTTP 501）**，真实充资资金路径未宣称完成。
 
 已验证：
 
-- `npm test`：8 个测试通过。
-- `npm run typecheck`：contracts、api、web 全部通过。
+- `npm test`：37 个测试全部通过（涵盖 contracts、api、web）。
+- `npm run typecheck`：contracts、api、web 静态类型检查全部通过。
 - `npm run build`：生产构建通过。
 - `npm audit --audit-level=high`：0 vulnerabilities。
-- Mock HTTP：health、bootstrap、quote、order、轮询成功态，以及 malformed JSON 400、未知订单 404、幂等键冲突 409。
+- Mock HTTP：health、node-info、bootstrap、quote、order、轮询成功态，以及 malformed JSON 400、未知订单 404、幂等键冲突 409。
+- RPC 边界测试：`CCH_MODE=rpc` 下 `POST /api/bootstrap` 严格返回 501（fail-closed），且无任何运营方私钥引入。
+- 浏览器通道接受器：`listChannels({ only_pending: true })` 轮询与 `acceptChannel({ temporary_channel_id, funding_amount: '0x0' })` 单元测试通过，mock 模式与无 pending 场景安全跳过。
 
 ## 已完成的工程决策
 
@@ -116,24 +120,28 @@ Operator 通过 `connect_peer` 成功连接 User 本地 multiaddr（端口 18228
 3. **步骤 7 外部依赖阻塞**：
    - 只有当外部提供真正可用的 CCH actor 与 LND 实例（支持基于对应 SHA-256 payment hash 的 hold invoice 与 `receive_btc` 兑付）时，才执行 BTC testnet 支付。此项明确为外部依赖未就绪阻塞。
 4. **交付状态与语气保留**：
-   - 本次改动仅限 `/tmp/ckb-on-ramp-poc/` 实验环境与 `docs/HANDOFF.md` 记录。
-   - 未改动任何 `apps/*` 代码；UI 与 README 继续保持 mock / testnet scaffold 语气，严禁虚假宣称真实充值已打通，`CCH_MODE=rpc` 继续 fail-closed。
+   - UI 与 README 继续保持 mock / testnet scaffold 语气，严禁虚假宣称真实充值已打通，`CCH_MODE=rpc` 继续 fail-closed。
+5. **FNN 缺少 CKB 转账 RPC 与 Operator 资助保持 Unwired 约束**：
+   - **实测证据**：Live FNN 实例（`127.0.0.1:18327`）经实测确认无 `send_ckb` 或 `send_transaction` RPC 方法（调用返回 `Method not found`）；`fiber-pay` 钱包工具仅支持地址与余额展示（address + balance only）。
+   - **架构与安全边界**：坚决不在后端 API 引入运营方私钥（`OPERATOR_*`），亦不在此层实现链上裸交易组装与签名。
+   - **结论**：Scheme B Phase-1 Operator gift 转账路径因 FNN 无 CKB send RPC 而受阻（blocked on FNN having no CKB send RPC），该资助转账在 API 端明确保持 unwired，`POST /api/bootstrap` 在 `CCH_MODE=rpc` 时严格 fail-closed（HTTP 501）。
+   - **浏览器端 0-CKB 接受就绪**：浏览器 WASM 节点在启动后轮询 `listChannels({ only_pending: true })`，识别入向要约（`is_acceptor: true`，状态 `NegotiatingFunding`）并显式调用 `acceptChannel({ temporary_channel_id, funding_amount: '0x0' })`。出资严格为 `'0x0'`，绝不触发 99 CKB 的 auto-accept；在 mock 模式或无 pending 通道时安全 skip，完全不破坏现有 mock 报价与订单流程。
 
 ## 后续任务清单（Forward Tasks）
 
-PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性，后续按以下顺序逐步推进：
+PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性，当前推进进展与后续任务如下：
 
-1. **`/api/node-info` 端点实现**：
-   - 后端服务提供真实的 Operator 节点信息接口（包含 Operator Pubkey、P2P 监听 multiaddr / WSS 地址、支持的 UDT Whitelist 配置与费率策略）。
-2. **浏览器端 `connect_peer` 连通性测试**：
-   - 浏览器 Fiber WASM 节点主动调用 `connect_peer` 连接 Operator 暴露的 WSS 节点地址，验证浏览器与 Operator 间 P2P 握手链路。
-3. **Scheme B 自动化 Bootstrap 状态机（第一阶段：无偿赞助）**：
-   - 编写并实测 Operator 钱包直接向用户浏览器节点地址发送 ~200 CKB Dust / Capacity 资助转账（取代手工 faucet），监控交易确认；
-   - 驱动 Operator 侧向用户节点发起带 cWBTC UDT 的 `open_channel`，并在用户端显式零出资调用 `accept_channel`，直至进入 `CHANNEL_READY`；
-   - 第一阶段不实现关渠后把容量退回赞助商。回收方案（余额归零关闭 / 通道常驻 / 协议演进）放到第二阶段，见 [scheme-b-ckb-refund.md](./scheme-b-ckb-refund.md)。
-4. **节点真实 UDT 余额证明（Balance Proof）**：
+1. **`/api/node-info` 端点实现（已完成）**：
+   - 后端服务已提供真实的 Operator 节点信息接口（包含 Operator Pubkey、P2P 监听 multiaddr / WSS 地址、通道数与 peer 数），支持 mock 与 rpc 模式。
+2. **浏览器端 `connect_peer` 连通性（已完成）**：
+   - 浏览器 Fiber WASM 节点在 prepareRoute 阶段主动挑选 WSS/WS 地址调用 `connect_peer` 连接 Operator，并在 rpc 模式下对无效/不可达地址 fail-closed。
+3. **前端通道接收端 0-CKB 握手状态机（已完成）**：
+   - 浏览器 Fiber 节点启动后自动轮询 `listChannels({ only_pending: true })`，遇到入向要约主动执行 `acceptChannel({ temporary_channel_id, funding_amount: '0x0' })`，严格以 0 CKB 出资完成握手；无 pending 通道或 mock 模式自动 skip。
+4. **Scheme B 自动化 Bootstrap 充资（受阻保持 Unwired）**：
+   - 因 live FNN 缺失 `send_ckb`/`send_transaction` RPC，且禁止向 API 注入运营方私钥，后端 Scheme B 预充资转账保持 unwired，`/api/bootstrap` 在 `CCH_MODE=rpc` 下继续 501 fail-closed。后续需待上游 FNN 引入受控转账 RPC 或独立安全出资守护进程。
+5. **节点真实 UDT 余额证明（Balance Proof）**：
    - 前后端打通通道状态轮询与 UDT 余额证明逻辑，确保用户支付 BTC 后，可在前端通过 Fiber WASM 节点验证 cWBTC `local_balance` 实际入账。
-5. **Passkey / IndexedDB 浏览器 WASM 端到端（E2E）**：
+6. **Passkey / IndexedDB 浏览器 WASM 端到端（E2E）**：
    - 在真实浏览器环境中测试完整生命周期：Passkey 创建与恢复、私钥解密导入 WASM 节点、IndexedDB 跨页面刷新数据持久化、通道恢复与 invoice 签署。
-6. **BTC Testnet 外部链路闭环（解除步骤 7 阻塞）**：
+7. **BTC Testnet 外部链路闭环（解除步骤 7 阻塞）**：
    - 接入真实的 CCH 服务商与 LND 节点，跑通实际 hold invoice 支付、preimage 释放与两阶段结算。

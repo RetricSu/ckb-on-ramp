@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useEffect } from 'react';
 import { useFiberNode, type UdtAsset, type UseFiberNodeOptions } from '@fiber-pay/react';
+import { startChannelAcceptor } from './channels';
 
 export const CWBTC_SCRIPT = {
   code_hash: '0x25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb' as `0x${string}`,
@@ -21,6 +22,20 @@ type FiberState = ReturnType<typeof useFiberNode>;
 const FiberContext = createContext<FiberState | null>(null);
 export function FiberProvider({ children }: { children: ReactNode }) {
   const fiber = useFiberNode({ network: 'testnet', enabled: true, nodeConfig: { udtWhitelist: UDT_WHITELIST } });
+
+  useEffect(() => {
+    if (!fiber.isRunning || !fiber.node) return;
+    const watcher = startChannelAcceptor({
+      node: fiber.node,
+      onError: (err) => {
+        console.warn('Fiber node channel acceptor poll error:', err);
+      },
+    });
+    return () => {
+      watcher.stop();
+    };
+  }, [fiber.isRunning, fiber.node]);
+
   return <FiberContext.Provider value={fiber}>{children}</FiberContext.Provider>;
 }
 export function useFiber() {
