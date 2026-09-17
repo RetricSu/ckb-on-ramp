@@ -1,4 +1,4 @@
-import type { BootstrapSession, CreateOrderRequest, HealthResponse, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
+import type { BootstrapRequest, BootstrapSession, CreateOrderRequest, HealthResponse, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3001/api';
 
@@ -14,16 +14,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { 'content-type': 'application/json', ...init?.headers },
   });
-  const payload = (await response.json()) as T & { error?: string };
-  if (!response.ok) throw new ApiError(payload.error ?? `API request failed with HTTP ${response.status}`, response.status);
+  const payload = (await response.json()) as T & { error?: string; message?: string };
+  if (!response.ok) throw new ApiError(payload.error ?? payload.message ?? `API request failed with HTTP ${response.status}`, response.status);
   return payload;
 }
 
 export const api = {
   health: () => request<HealthResponse>('/health'),
   nodeInfo: () => request<NodeInfo>('/node-info'),
-  bootstrap: (nodePubkey: string) => request<BootstrapSession>('/bootstrap', {
-    method: 'POST', body: JSON.stringify({ node_pubkey: nodePubkey }),
+  bootstrap: (payload: BootstrapRequest) => request<BootstrapSession>('/bootstrap', {
+    method: 'POST', body: JSON.stringify(payload),
   }),
   quote: (receiveRaw: string) => request<Quote>('/quotes', {
     method: 'POST', body: JSON.stringify({ receive_raw: receiveRaw }),

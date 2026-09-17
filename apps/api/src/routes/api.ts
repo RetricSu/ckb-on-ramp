@@ -35,7 +35,10 @@ router.get('/node-info', async (_req, res, next) => {
 });
 router.post('/bootstrap', async (req, res) => {
   try {
-    const session = await prepareInboundLiquidity(String(req.body?.node_pubkey ?? ''));
+    const session = await prepareInboundLiquidity({
+      node_pubkey: String(req.body?.node_pubkey ?? ''),
+      funding_address: String(req.body?.funding_address ?? ''),
+    });
     res.status(session.status === 'failed' ? 501 : 201).json(session);
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });

@@ -84,7 +84,8 @@ footer p { width: min(76rem, 100%); margin: 0 auto; }
 @media (min-width: 40rem) {
   .intro { grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr); }
   .panel-heading { flex-direction: row; align-items: flex-start; justify-content: space-between; }
-  .node-facts, .quote dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .node-facts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .quote dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .node-facts div + div, .quote dl div + div { border-inline-start: var(--rule-thin) solid var(--color-rule); }
   .trust dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }

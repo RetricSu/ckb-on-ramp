@@ -1,6 +1,9 @@
 export type Environment = 'mock' | 'testnet';
 export type BootstrapStatus = 'waiting_for_node' | 'connecting_peer' | 'provisioning_liquidity' | 'ready' | 'failed';
-export interface BootstrapRequest { node_pubkey: string; }
+export interface BootstrapRequest {
+  node_pubkey: string;
+  funding_address: string;
+}
 export interface BootstrapSession {
   session_id: string;
   status: BootstrapStatus;

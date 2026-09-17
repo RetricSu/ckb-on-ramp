@@ -4,6 +4,7 @@ import type { BootstrapSession, HealthResponse, NodeInfo, Quote, SwapOrder } fro
 import { ApiError, api } from './api';
 import { formatCwbtc, parseCwbtc, toHex } from './amount';
 import { CWBTC_ASSET, CWBTC_SCRIPT, FiberProvider, useFiber } from './FiberProvider';
+import { pickPeerAddress, prepareReceiveRoute } from './peer';
 
 type Busy = 'bootstrap' | 'quote' | 'order' | null;
 
@@ -64,6 +65,9 @@ function Workbench() {
     catch (reason) { return { raw: null, error: reason instanceof Error ? reason.message : String(reason) }; }
   }, [amount]);
   const nodePubkey = fiber.nodeInfo?.pubkey;
+  const peerAddress = useMemo(() => {
+    return bootstrap?.peer_address ?? pickPeerAddress(operatorNode?.addresses) ?? null;
+  }, [bootstrap?.peer_address, operatorNode?.addresses]);
   const routeReady = bootstrap?.status === 'ready';
   const canQuote = routeReady && parsed.raw !== null && !busy;
 
@@ -75,9 +79,16 @@ function Workbench() {
   }, []);
 
   const prepareRoute = () => run('bootstrap', async () => {
-    if (!nodePubkey) throw new Error('Start the browser Fiber node before preparing a receive route.');
-    const next = await api.bootstrap(nodePubkey); setBootstrap(next);
-    if (next.status !== 'ready') throw new Error(next.message);
+    const next = await prepareReceiveRoute({
+      nodePubkey,
+      defaultFundingLockScript: fiber.nodeInfo?.default_funding_lock_script,
+      connectPeer: fiber.node ? (params) => fiber.node!.connectPeer(params) : null,
+      getNodeInfo: () => api.nodeInfo(),
+      bootstrap: (request) => api.bootstrap(request),
+      mode: health?.mode,
+      onOperatorNode: setOperatorNode,
+    });
+    setBootstrap(next);
   });
   const requestQuote = () => run('quote', async () => {
     if (!parsed.raw) throw new Error('Enter a valid cWBTC amount.');
@@ -134,6 +145,7 @@ function Workbench() {
             <dl className="node-facts">
               <div><dt>Browser node</dt><dd>{nodePubkey ? shorten(nodePubkey) : 'Create with the button above'}</dd></div>
               <div><dt>Operator node</dt><dd>{operatorNode?.node_id ? shorten(operatorNode.node_id) : 'Unavailable'}</dd></div>
+              <div><dt>Peer address</dt><dd title={peerAddress ?? undefined}>{peerAddress ? shorten(peerAddress, 14, 10) : (operatorNode ? 'None' : 'Unavailable')}</dd></div>
               <div><dt>Receive route</dt><dd>{routeReady ? 'Ready' : 'Not prepared'}</dd></div>
             </dl>
 

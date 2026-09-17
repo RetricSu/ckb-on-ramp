@@ -195,7 +195,10 @@ describe('NodeInfo Service and Route', () => {
             const res = await fetch(\`http://127.0.0.1:\${port}/api/bootstrap\`, {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ node_pubkey: "03dfe0e6cc02a21ca3a971bc2fa05474872dc2acb91cc5defeb1f0566888536957" }),
+              body: JSON.stringify({
+                node_pubkey: "03dfe0e6cc02a21ca3a971bc2fa05474872dc2acb91cc5defeb1f0566888536957",
+                funding_address: "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq05hurcuuzeudh8ldfcxp48jfj2efakgkqz78dss",
+              }),
             });
             console.log(JSON.stringify({ status: res.status, body: await res.json() }));
             server.close();
@@ -216,6 +219,8 @@ describe('NodeInfo Service and Route', () => {
 
       assert.equal(parsed.status, 501);
       assert.equal(parsed.body.status, 'failed');
+      assert.match(parsed.body.message, /Scheme B/i);
+      assert.match(parsed.body.message, /not wired/i);
     });
   });
 });
