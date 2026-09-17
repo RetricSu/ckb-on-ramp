@@ -7,17 +7,22 @@
 仓库已经有一个可运行的 mock vertical slice：浏览器 Fiber WASM 节点、报价、Fiber SHA-256 invoice、后端 CCH adapter、LND BOLT11 展示、订单轮询和恢复错误态。
 已完成 `/api/node-info` 端点与前端 `connect_peer` 连通链路，并实现了前端浏览器 Fiber 节点对入向通道要约的 0-CKB 自动接受轮询器（`funding_amount: '0x0'`，绝不触发 99 CKB auto-accept）。
 
-**实测关键阻塞与边界保留**：
-经 live 实测验证，运行中的测试网 FNN 实例（`127.0.0.1:18327`）不存在 `send_ckb` 或 `send_transaction` RPC 方法（调用直接返回 `Method not found`）；`fiber-pay` 钱包 CLI/API 仅支持地址与余额查询（address + balance only）。为恪守私钥与安全边界，**绝不向 API 后端添加运营方私钥（`OPERATOR_*`）**。因此，运营方无偿赠予 CKB（Scheme B Phase-1 gift transfer）在缺乏 FNN 链上转账 RPC 的情况下明确保持 **unwired**，`CCH_MODE=rpc` 的 bootstrap 继续 **fail-closed（HTTP 501）**，真实充资资金路径未宣称完成。
+**Scheme B Phase-1 Operator CKB 预资助与 FNN 通道开通打通**：
+根据上级指示，通过引入 CCC CKB SDK（`@ckb-ccc/core`）打通了链上容量赞助与通道开通链路：
+- **容量赞助（≥200 CKB）**：在后端配置 `OPERATOR_CKB_PRIVATE_KEY`（以及可选的 `CKB_RPC_URL`，默认 testnet）后，后端使用 CCC `SignerCkbPrivateKey` 组装向用户节点 `funding_address` 转出 200 CKB 容量的交易，并调用 `waitTransaction` 等待链上确认。
+- **FNN 通道开通（cWBTC）**：链上容量确认后，调用 FNN `open_channel` 向用户的 `node_pubkey` 发起 cWBTC 通道开通（`funding_amount` 默认 `100000000` raw，类型脚本与前端 `CWBTC_SCRIPT` 严格一致）。
+- **非阻塞式状态返回（`provisioning_liquidity`）**：建渠发起后立即返回 `status: 'provisioning_liquidity'`，不阻断 HTTP 请求等待 `CHANNEL_READY`。
+- **Fail-Closed 边界保持**：在 `CCH_MODE=rpc` 下，若未配置 `OPERATOR_CKB_PRIVATE_KEY`，接口继续严格返回 **HTTP 501**；在 `CCH_MODE=mock` 下，继续返回 **HTTP 201 ready** 且完全不产生任何链上/CCC 外部调用。
+- **前端握手协同**：前端 `prepareReceiveRoute` 将 `provisioning_liquidity` 视作进行中状态（而非错误），界面展示开渠进行中提示；后台现有的 0x0 自动通道接受器（`startChannelAcceptor`）保持不变，自动完成零 CKB 出资握手。
+- **私钥安全防线**：任何日志、报错与 HTTP 响应严禁打印或泄露运营方私钥，代码层内置私钥抹除与重写机制。
 
 已验证：
 
-- `npm test`：37 个测试全部通过（涵盖 contracts、api、web）。
+- `npm test`：73 个测试全部通过（35 api + 38 web）。
 - `npm run typecheck`：contracts、api、web 静态类型检查全部通过。
 - `npm run build`：生产构建通过。
-- `npm audit --audit-level=high`：0 vulnerabilities。
 - Mock HTTP：health、node-info、bootstrap、quote、order、轮询成功态，以及 malformed JSON 400、未知订单 404、幂等键冲突 409。
-- RPC 边界测试：`CCH_MODE=rpc` 下 `POST /api/bootstrap` 严格返回 501（fail-closed），且无任何运营方私钥引入。
+- RPC 边界测试：`CCH_MODE=rpc` 下未配置密钥时 `POST /api/bootstrap` 严格返回 501（fail-closed）；配置密钥后发送 ≥200 CKB 并调用 `open_channel` 返回 `provisioning_liquidity`（201）。
 - 浏览器通道接受器：`listChannels({ only_pending: true })` 轮询与 `acceptChannel({ temporary_channel_id, funding_amount: '0x0' })` 单元测试通过，mock 模式与无 pending 场景安全跳过。
 
 ## 已完成的工程决策
@@ -137,8 +142,8 @@ PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性，当前推
    - 浏览器 Fiber WASM 节点在 prepareRoute 阶段主动挑选 WSS/WS 地址调用 `connect_peer` 连接 Operator，并在 rpc 模式下对无效/不可达地址 fail-closed。
 3. **前端通道接收端 0-CKB 握手状态机（已完成）**：
    - 浏览器 Fiber 节点启动后自动轮询 `listChannels({ only_pending: true })`，遇到入向要约主动执行 `acceptChannel({ temporary_channel_id, funding_amount: '0x0' })`，严格以 0 CKB 出资完成握手；无 pending 通道或 mock 模式自动 skip。
-4. **Scheme B 自动化 Bootstrap 充资（受阻保持 Unwired）**：
-   - 因 live FNN 缺失 `send_ckb`/`send_transaction` RPC，且禁止向 API 注入运营方私钥，后端 Scheme B 预充资转账保持 unwired，`/api/bootstrap` 在 `CCH_MODE=rpc` 下继续 501 fail-closed。后续需待上游 FNN 引入受控转账 RPC 或独立安全出资守护进程。
+4. **Scheme B 自动化 Bootstrap 充资与开渠（已完成 Phase-1 CCC + FNN 链路）**：
+   - 针对 live FNN 缺失 `send_ckb` RPC 的限制，引入 `@ckb-ccc/core` SDK 与 `OPERATOR_CKB_PRIVATE_KEY` 环境变量，实现 `CccOperatorCkbSender` 向用户 `funding_address` 发送 ≥200 CKB 容量预资助并在链上等待确认，随后调用 FNN `open_channel` 发起 cWBTC 通道开通并返回 `provisioning_liquidity` 状态。未配置密钥时保持 501 fail-closed。前端将 `provisioning_liquidity` 视作进行中状态，结合 0-CKB 接受器自动完成建渠协商。
 5. **节点真实 UDT 余额证明（Balance Proof）**：
    - 前后端打通通道状态轮询与 UDT 余额证明逻辑，确保用户支付 BTC 后，可在前端通过 Fiber WASM 节点验证 cWBTC `local_balance` 实际入账。
 6. **Passkey / IndexedDB 浏览器 WASM 端到端（E2E）**：

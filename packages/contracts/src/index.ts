@@ -9,6 +9,7 @@ export interface BootstrapSession {
   status: BootstrapStatus;
   peer_address?: string;
   channel_id?: string;
+  gift_tx_hash?: string;
   message: string;
 }
 export interface QuoteRequest { receive_raw: string; }
@@ -40,3 +41,9 @@ export interface NodeInfo {
   channel_count: number;
   peer_count: number;
 }
+export const CWBTC_SCRIPT = {
+  code_hash: '0x25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb' as `0x${string}`,
+  hash_type: 'type' as const,
+  args: '0x9a1086531ed6dc69e0bd44cef5278e03faf3015b31aff60b08fb87663ce8507100000000' as `0x${string}`,
+};
+

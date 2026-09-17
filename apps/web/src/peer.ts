@@ -42,9 +42,8 @@ export interface PrepareRouteOptions {
  * 1. Verifying the browser Fiber node is running.
  * 2. Deriving the funding address from default_funding_lock_script via scriptToAddress.
  * 3. Fetching operator node info and picking a WebSocket multiaddr.
- * 4. In RPC/testnet mode: dialing connectPeer with fail-closed semantics on empty or failing addresses.
- * 5. In Mock mode: skipping dial to avoid mock DNS failures.
- * 6. Calling backend bootstrap with node_pubkey and funding_address.
+ * 4. Dialing connectPeer with fail-closed semantics on empty or failing addresses.
+ * 5. Calling backend bootstrap with node_pubkey and funding_address.
  */
 export async function prepareReceiveRoute(options: PrepareRouteOptions): Promise<BootstrapSession> {
   if (!options.nodePubkey || !options.connectPeer) {
@@ -69,25 +68,21 @@ export async function prepareReceiveRoute(options: PrepareRouteOptions): Promise
   options.onOperatorNode?.(info);
 
   const peerAddress = pickPeerAddress(info.addresses);
-  const isMock = options.mode === 'mock' || isMockPeerAddress(peerAddress);
-
-  if (!isMock) {
-    if (!peerAddress) {
-      throw new Error('Operator has no reachable WebSocket address (WSS/WS) advertised.');
-    }
-    try {
-      await options.connectPeer({ address: peerAddress, save: true });
-    } catch (reason) {
-      const detail = reason instanceof Error ? reason.message : String(reason);
-      throw new Error(`Failed to connect to operator peer (${peerAddress}): ${detail}`);
-    }
+  if (!peerAddress) {
+    throw new Error('Operator has no reachable WebSocket address (WSS/WS) advertised.');
+  }
+  try {
+    await options.connectPeer({ address: peerAddress, save: true });
+  } catch (reason) {
+    const detail = reason instanceof Error ? reason.message : String(reason);
+    throw new Error(`Failed to connect to operator peer (${peerAddress}): ${detail}`);
   }
 
   const session = await options.bootstrap({
     node_pubkey: options.nodePubkey,
     funding_address: fundingAddress,
   });
-  if (session.status !== 'ready') {
+  if (session.status !== 'ready' && session.status !== 'provisioning_liquidity') {
     throw new Error(session.message);
   }
   return session;

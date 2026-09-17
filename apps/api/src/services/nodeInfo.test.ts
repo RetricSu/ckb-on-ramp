@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import apiRouter from '../routes/api.js';
+import apiRouter, { createApiRouter } from '../routes/api.js';
 import { CchRpcError, MockCchGateway, RpcCchGateway } from './cch.js';
 
 describe('NodeInfo Service and Route', () => {
@@ -137,13 +137,89 @@ describe('NodeInfo Service and Route', () => {
       const gateway = new RpcCchGateway('http://127.0.0.1:59999');
       await assert.rejects(async () => gateway.getNodeInfo(), /fetch failed|ECONNREFUSED/);
     });
+
+    it('openChannel sends RPC request and parses channel_id', async () => {
+      let requestedMethod = '';
+      let requestedParams: unknown[] = [];
+      const fnnServer = createServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          const payload = JSON.parse(body) as { method: string; params: unknown[]; id: string };
+          requestedMethod = payload.method;
+          requestedParams = payload.params;
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: payload.id,
+            result: {
+              channel_id: '0x60e1bb6f3c2618eadcaec013fabc1a29eadd9a17ef369bd273baedfea66817c7',
+            },
+          }));
+        });
+      });
+
+      await new Promise<void>((resolve) => fnnServer.listen(0, resolve));
+      const address = fnnServer.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+
+      try {
+        const gateway = new RpcCchGateway(`http://127.0.0.1:${port}`);
+        const result = await gateway.openChannel({
+          pubkey: '0328d1d5ba5f060786ee7e22ac56f40664fae1354b2d48d22ebd6ca9d0e89082a5',
+          funding_amount: '0x5f5e100',
+          one_way: true,
+          public: false,
+        });
+
+        assert.equal(requestedMethod, 'open_channel');
+        assert.equal(result.channel_id, '0x60e1bb6f3c2618eadcaec013fabc1a29eadd9a17ef369bd273baedfea66817c7');
+        assert.equal((requestedParams[0] as { funding_amount: string }).funding_amount, '0x5f5e100');
+      } finally {
+        await new Promise<void>((resolve) => fnnServer.close(() => resolve()));
+      }
+    });
+
+    it('openChannel accepts temporary_channel_id fallback', async () => {
+      const fnnServer = createServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          const payload = JSON.parse(body) as { id: string };
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: payload.id,
+            result: {
+              temporary_channel_id: '0xtemp_channel_12345',
+            },
+          }));
+        });
+      });
+
+      await new Promise<void>((resolve) => fnnServer.listen(0, resolve));
+      const address = fnnServer.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+
+      try {
+        const gateway = new RpcCchGateway(`http://127.0.0.1:${port}`);
+        const result = await gateway.openChannel({
+          pubkey: '0328d1d5ba5f060786ee7e22ac56f40664fae1354b2d48d22ebd6ca9d0e89082a5',
+          funding_amount: '0x5f5e100',
+        });
+
+        assert.equal(result.channel_id, '0xtemp_channel_12345');
+      } finally {
+        await new Promise<void>((resolve) => fnnServer.close(() => resolve()));
+      }
+    });
   });
 
   describe('GET /api/node-info HTTP route', () => {
-    it('returns HTTP 200 and NodeInfo DTO in mock mode', async () => {
+    it('returns HTTP 200 and NodeInfo DTO with injected test gateway', async () => {
       const app = express();
       app.use(express.json());
-      app.use('/api', apiRouter);
+      app.use('/api', createApiRouter({ cchGateway: new MockCchGateway() }));
 
       const server = createServer(app);
       await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -173,8 +249,8 @@ describe('NodeInfo Service and Route', () => {
     });
   });
 
-  describe('CCH_MODE=rpc fail-closed bootstrap verification', () => {
-    it('POST /api/bootstrap returns HTTP 501 when CCH_MODE=rpc', () => {
+  describe('Fail-closed bootstrap verification', () => {
+    it('POST /api/bootstrap returns HTTP 501 when operator key is not configured', () => {
       const output = execFileSync(
         process.execPath,
         [
@@ -207,7 +283,7 @@ describe('NodeInfo Service and Route', () => {
         ],
         {
           cwd: fileURLToPath(new URL('../..', import.meta.url)),
-          env: { ...process.env, CCH_MODE: 'rpc' },
+          env: { ...process.env },
           encoding: 'utf8',
         },
       );

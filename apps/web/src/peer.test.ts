@@ -289,60 +289,72 @@ describe('Peer address picker and route preparation', () => {
           /Scheme B inbound-liquidity provisioning.*not wired/,
         );
       });
-    });
 
-    describe('in Mock mode', () => {
-      it('skips dialing real P2P on mock address and successfully completes bootstrap', async () => {
-        let connectPeerCalled = false;
-        let receivedRequest: BootstrapRequest | null = null;
+      it('accepts provisioning_liquidity status as in-progress without throwing', async () => {
+        const liveNodeInfo: NodeInfo = {
+          node_id: '03dfe0e6cc02a21ca3a971bc2fa05474872dc2acb91cc5defeb1f0566888536957',
+          addresses: ['/ip4/127.0.0.1/tcp/18328/ws'],
+          channel_count: 1,
+          peer_count: 2,
+        };
 
-        const mockSession: BootstrapSession = {
-          session_id: 'mock-session-123',
-          status: 'ready',
-          peer_address: '/dns4/mock-provider.test/tcp/8228/p2p/029a8d5b',
-          channel_id: 'mock_123',
-          message: 'Mock inbound route is ready (simulated Phase-1 Scheme B gifted capacity).',
+        const session: BootstrapSession = {
+          session_id: 'prov-session',
+          status: 'provisioning_liquidity',
+          channel_id: '0x123',
+          message: 'Capacity gift confirmed. Channel opening initiated.',
         };
 
         const result = await prepareReceiveRoute({
           nodePubkey: '029a8d5b...',
           fundingAddress: explicitFundingAddress,
-          connectPeer: async () => { connectPeerCalled = true; },
+          connectPeer: async () => {},
+          getNodeInfo: async () => liveNodeInfo,
+          bootstrap: async () => session,
+          mode: 'testnet',
+        });
+
+        assert.equal(result.status, 'provisioning_liquidity');
+        assert.equal(result.channel_id, '0x123');
+      });
+    });
+
+    describe('with injected fake connectPeer', () => {
+      it('invokes injected connectPeer on picked address and successfully completes bootstrap', async () => {
+        let connectPeerCalled = false;
+        let connectedAddr = '';
+        let receivedRequest: BootstrapRequest | null = null;
+
+        const fakeSession: BootstrapSession = {
+          session_id: 'fake-session-123',
+          status: 'ready',
+          peer_address: '/dns4/mock-provider.test/tcp/8228/p2p/029a8d5b',
+          channel_id: 'channel_123',
+          message: 'Route ready',
+        };
+
+        const result = await prepareReceiveRoute({
+          nodePubkey: '029a8d5b...',
+          fundingAddress: explicitFundingAddress,
+          connectPeer: async ({ address }) => {
+            connectPeerCalled = true;
+            connectedAddr = address;
+          },
           getNodeInfo: async () => mockNodeInfo,
           bootstrap: async (req) => {
             receivedRequest = req;
-            return mockSession;
+            return fakeSession;
           },
-          mode: 'mock',
         });
 
-        assert.equal(connectPeerCalled, false, 'connectPeer must be skipped in mock mode to avoid DNS failure');
+        assert.equal(connectPeerCalled, true, 'connectPeer must be called with picked address');
+        assert.equal(connectedAddr, '/dns4/mock-provider.test/tcp/8443/wss');
         assert.deepEqual(receivedRequest, {
           node_pubkey: '029a8d5b...',
           funding_address: explicitFundingAddress,
         });
         assert.equal(result.status, 'ready');
-        assert.equal(result.session_id, 'mock-session-123');
-      });
-
-      it('skips dialing real P2P even if mode is undefined but address is mock-provider.test', async () => {
-        let connectPeerCalled = false;
-
-        const result = await prepareReceiveRoute({
-          nodePubkey: '029a8d5b...',
-          fundingAddress: explicitFundingAddress,
-          connectPeer: async () => { connectPeerCalled = true; },
-          getNodeInfo: async () => mockNodeInfo,
-          bootstrap: async () => ({
-            session_id: 'mock-session-456',
-            status: 'ready',
-            message: 'Mock inbound route is ready.',
-          }),
-          mode: undefined,
-        });
-
-        assert.equal(connectPeerCalled, false, 'connectPeer must be skipped when address is mock');
-        assert.equal(result.status, 'ready');
+        assert.equal(result.session_id, 'fake-session-123');
       });
     });
   });

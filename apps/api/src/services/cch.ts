@@ -22,11 +22,26 @@ interface FnnNodeInfoResult {
   peer_count?: string | number;
   peers_count?: string | number;
 }
+export interface OpenChannelParams {
+  pubkey: string;
+  funding_amount: string;
+  funding_udt_type_script?: {
+    code_hash: string;
+    hash_type: string;
+    args: string;
+  };
+  one_way?: boolean;
+  public?: boolean;
+}
+export interface OpenChannelResult {
+  channel_id: string;
+}
 export interface CchGateway {
   createOrder(input: CreateOrderRequest, quote: Quote): Promise<SwapOrder>;
   getOrder(paymentHash: string): Promise<SwapOrder | null>;
   health(): Promise<boolean>;
   getNodeInfo(): Promise<NodeInfo>;
+  openChannel(params: OpenChannelParams): Promise<OpenChannelResult>;
 }
 const extractLightningInvoice = (value: ReceiveBtcResult['incoming_invoice']): string => {
   if (typeof value === 'string') return value;
@@ -92,6 +107,9 @@ export class MockCchGateway implements CchGateway {
       channel_count: 0,
       peer_count: 0,
     };
+  }
+  async openChannel(_params: OpenChannelParams): Promise<OpenChannelResult> {
+    return { channel_id: `mock_${randomUUID()}` };
   }
 }
 export class RpcCchGateway implements CchGateway {
@@ -166,5 +184,15 @@ export class RpcCchGateway implements CchGateway {
       peer_count: peerCount,
     };
   }
+  async openChannel(params: OpenChannelParams): Promise<OpenChannelResult> {
+    const raw = await this.call<{ channel_id?: string; temporary_channel_id?: string }>('open_channel', [params]);
+    const channelId = raw.channel_id ?? raw.temporary_channel_id;
+    if (!channelId || typeof channelId !== 'string') {
+      throw new Error('FNN open_channel did not return a valid channel_id');
+    }
+    return {
+      channel_id: channelId,
+    };
+  }
 }
-export const cchGateway: CchGateway = config.mode === 'rpc' ? new RpcCchGateway() : new MockCchGateway();
+export const cchGateway: CchGateway = new RpcCchGateway();

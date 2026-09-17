@@ -25,6 +25,7 @@ export const api = {
   bootstrap: (payload: BootstrapRequest) => request<BootstrapSession>('/bootstrap', {
     method: 'POST', body: JSON.stringify(payload),
   }),
+  getBootstrapSession: (sessionId: string) => request<BootstrapSession>(`/bootstrap/${encodeURIComponent(sessionId)}`),
   quote: (receiveRaw: string) => request<Quote>('/quotes', {
     method: 'POST', body: JSON.stringify({ receive_raw: receiveRaw }),
   }),

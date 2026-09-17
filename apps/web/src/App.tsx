@@ -68,8 +68,49 @@ function Workbench() {
   const peerAddress = useMemo(() => {
     return bootstrap?.peer_address ?? pickPeerAddress(operatorNode?.addresses) ?? null;
   }, [bootstrap?.peer_address, operatorNode?.addresses]);
+  const isProvisioning = bootstrap?.status === 'provisioning_liquidity';
   const routeReady = bootstrap?.status === 'ready';
   const canQuote = routeReady && parsed.raw !== null && !busy;
+
+  useEffect(() => {
+    if (!isProvisioning || !bootstrap?.session_id || bootstrap.channel_id) return;
+    const sessionId = bootstrap.session_id;
+    const timer = window.setInterval(async () => {
+      try {
+        const updated = await api.getBootstrapSession(sessionId);
+        if (updated.status === 'failed') {
+          setError(updated.message);
+          setBootstrap(updated);
+        } else if (updated.channel_id) {
+          setBootstrap(updated);
+        }
+      } catch (error) {
+        void error;
+        // Polling retry loop ignores transient network errors
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [isProvisioning, bootstrap?.session_id, bootstrap?.channel_id]);
+
+  useEffect(() => {
+    if (!isProvisioning || !fiber.node) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await fiber.node?.listChannels({});
+        const readyChannel = res?.channels.find((ch) => {
+          const stateName = ch.state?.state_name?.toUpperCase();
+          return stateName === 'CHANNELREADY' || stateName === 'CHANNEL_READY';
+        });
+        if (readyChannel) {
+          setBootstrap((prev) => prev ? { ...prev, status: 'ready', channel_id: readyChannel.channel_id } : null);
+        }
+      } catch (error) {
+        void error;
+        // Polling retry loop ignores transient network errors
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [isProvisioning, fiber.node]);
 
   const run = useCallback(async (kind: Exclude<Busy, null>, operation: () => Promise<void>) => {
     setBusy(kind); setError(null);
@@ -126,12 +167,10 @@ function Workbench() {
           <p className="lede">Create a Fiber node in this browser, pay one Lightning invoice from your own LND, and receive cWBTC without opening an exchange account.</p>
         </section>
 
-        {health?.mode === 'mock' && <div className="notice" role="status"><strong>Mock operator.</strong> The browser node is real; inbound liquidity and CCH settlement are simulated.</div>}
-
         <div className="workbench">
           <ol className="steps" aria-label="Deposit steps">
             <li className={fiber.isRunning ? 'complete' : 'active'}><span>1</span><div><strong>Start node</strong><small>Passkey-protected in this browser</small></div></li>
-            <li className={routeReady ? 'complete' : fiber.isRunning ? 'active' : ''}><span>2</span><div><strong>Prepare route</strong><small>Provider supplies inbound liquidity</small></div></li>
+            <li className={routeReady ? 'complete' : (fiber.isRunning || isProvisioning) ? 'active' : ''}><span>2</span><div><strong>Prepare route</strong><small>{isProvisioning ? 'Provisioning liquidity…' : 'Provider supplies inbound liquidity'}</small></div></li>
             <li className={quote ? 'complete' : routeReady ? 'active' : ''}><span>3</span><div><strong>Set amount</strong><small>Review amount and operator fee</small></div></li>
             <li className={order ? 'active' : ''}><span>4</span><div><strong>Pay from LND</strong><small>Keys and macaroon stay with you</small></div></li>
           </ol>
@@ -146,15 +185,25 @@ function Workbench() {
               <div><dt>Browser node</dt><dd>{nodePubkey ? shorten(nodePubkey) : 'Create with the button above'}</dd></div>
               <div><dt>Operator node</dt><dd>{operatorNode?.node_id ? shorten(operatorNode.node_id) : 'Unavailable'}</dd></div>
               <div><dt>Peer address</dt><dd title={peerAddress ?? undefined}>{peerAddress ? shorten(peerAddress, 14, 10) : (operatorNode ? 'None' : 'Unavailable')}</dd></div>
-              <div><dt>Receive route</dt><dd>{routeReady ? 'Ready' : 'Not prepared'}</dd></div>
+              <div><dt>Receive route</dt><dd>{routeReady ? 'Ready' : isProvisioning ? 'Provisioning liquidity…' : 'Not prepared'}</dd></div>
             </dl>
 
             {!routeReady && (
               <div className="action-block">
-                <p>A fresh node cannot receive until a service peer opens or provisions a route with inbound UDT liquidity.</p>
-                <button className="button primary" onClick={() => void prepareRoute()} disabled={!fiber.isRunning || busy !== null}>
-                  {busy === 'bootstrap' ? 'Preparing…' : 'Prepare receive route'}
-                </button>
+                <p>
+                  {isProvisioning
+                    ? 'Operator has gifted CKB capacity and initiated channel opening. Channel acceptance is in progress in the background.'
+                    : 'A fresh node cannot receive until a service peer opens or provisions a route with inbound UDT liquidity.'}
+                </p>
+                {isProvisioning ? (
+                  <div className="notice" role="status">
+                    <strong>Opening channel…</strong> The browser node is accepting the incoming channel. Keep this page open.
+                  </div>
+                ) : (
+                  <button className="button primary" onClick={() => void prepareRoute()} disabled={!fiber.isRunning || busy !== null}>
+                    {busy === 'bootstrap' ? 'Preparing…' : 'Prepare receive route'}
+                  </button>
+                )}
                 {!fiber.isRunning && <p className="helper">Start the Fiber node first. Its private key remains browser-side.</p>}
               </div>
             )}
