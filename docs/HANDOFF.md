@@ -109,6 +109,7 @@ Operator 通过 `connect_peer` 成功连接 User 本地 multiaddr（端口 18228
 1. **Bootstrap 机制的硬性要求与 Scheme B 定位**：
    - 真正的零资产外部普通用户（无 CKB、无 UDT）首次访问应用时，**无法**直接在链上协同开通 Fiber 通道（Dual-Funding 强制要求接收端筹集约 184 CKB 作为 Commitment cell 容量储备）。
    - 要跑通端到端无门槛入金，产品架构必须明确引入 **Scheme B（Operator CKB Dust / Capacity 预资助）**：由运营方赞助并垫付这笔 ~184 CKB 容量储备（除非未来 Fiber 协议支持 Single-funder channel 由开方完全出资 368 CKB cell 容量）。
+   - **关渠退回**：详见 [scheme-b-ckb-refund.md](./scheme-b-ckb-refund.md)。用户持有 cWBTC 关到 L1 时，184 CKB 与 UDT 绑在同一 Cell，无法在不拿走用户币的前提下退回赞助商。**第一阶段只做无偿赞助，不实现回收；第二阶段再处理。**
    - **关键未证实点**：实测中 `user-zero` 的 CKB 容量资金直接来自测试网 Faucet（交易 `0x451e6906be9c8ebdde5c75f8dc0aaf6375260427bed559cae8ae8acb47681937`），而非 Operator 钱包转出。运营方钱包程序化自主发放 Dust 的机制与流程尚未得到实测验证。
 2. **CLI 验证不代表浏览器 WASM 路径就绪**：
    - 使用独立 CLI 二进制（`fiber-pay 0.3.0` / FNN `0.9.0-rc7`）本地实测步骤 1–6 成功，**并不等于**浏览器 WASM 运行环境打通。浏览器端还面临跨源隔离（COOP/COEP）、WSS/WebTransport 直连限制、Passkey 私钥派生及 IndexedDB 状态跨刷新恢复等异构工程挑战。
@@ -126,9 +127,10 @@ PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性，后续按
    - 后端服务提供真实的 Operator 节点信息接口（包含 Operator Pubkey、P2P 监听 multiaddr / WSS 地址、支持的 UDT Whitelist 配置与费率策略）。
 2. **浏览器端 `connect_peer` 连通性测试**：
    - 浏览器 Fiber WASM 节点主动调用 `connect_peer` 连接 Operator 暴露的 WSS 节点地址，验证浏览器与 Operator 间 P2P 握手链路。
-3. **Scheme B 自动化 Bootstrap 状态机**：
+3. **Scheme B 自动化 Bootstrap 状态机（第一阶段：无偿赞助）**：
    - 编写并实测 Operator 钱包直接向用户浏览器节点地址发送 ~200 CKB Dust / Capacity 资助转账（取代手工 faucet），监控交易确认；
-   - 驱动 Operator 侧向用户节点发起带 cWBTC UDT 的 `open_channel`，并在用户端显式零出资调用 `accept_channel`，直至进入 `CHANNEL_READY`。
+   - 驱动 Operator 侧向用户节点发起带 cWBTC UDT 的 `open_channel`，并在用户端显式零出资调用 `accept_channel`，直至进入 `CHANNEL_READY`；
+   - 第一阶段不实现关渠后把容量退回赞助商。回收方案（余额归零关闭 / 通道常驻 / 协议演进）放到第二阶段，见 [scheme-b-ckb-refund.md](./scheme-b-ckb-refund.md)。
 4. **节点真实 UDT 余额证明（Balance Proof）**：
    - 前后端打通通道状态轮询与 UDT 余额证明逻辑，确保用户支付 BTC 后，可在前端通过 Fiber WASM 节点验证 cWBTC `local_balance` 实际入账。
 5. **Passkey / IndexedDB 浏览器 WASM 端到端（E2E）**：
