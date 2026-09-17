@@ -1,4 +1,4 @@
-import type { BootstrapSession, CreateOrderRequest, HealthResponse, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
+import type { BootstrapSession, CreateOrderRequest, HealthResponse, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3001/api';
 
@@ -21,6 +21,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<HealthResponse>('/health'),
+  nodeInfo: () => request<NodeInfo>('/node-info'),
   bootstrap: (nodePubkey: string) => request<BootstrapSession>('/bootstrap', {
     method: 'POST', body: JSON.stringify({ node_pubkey: nodePubkey }),
   }),

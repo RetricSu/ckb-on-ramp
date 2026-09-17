@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { CreateOrderRequest, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
+import type { CreateOrderRequest, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
 import { config } from '../config.js';
 
 interface RpcEnvelope<T> { result?: T; error?: { code: number; message: string }; }
@@ -11,10 +11,22 @@ interface ReceiveBtcResult {
   fee_sats?: string;
   status?: SwapOrder['status'];
 }
+interface FnnNodeInfoResult {
+  version?: string;
+  commit_hash?: string;
+  pubkey?: string;
+  node_id?: string;
+  addresses?: string[];
+  channel_count?: string | number;
+  pending_channel_count?: string | number;
+  peer_count?: string | number;
+  peers_count?: string | number;
+}
 export interface CchGateway {
   createOrder(input: CreateOrderRequest, quote: Quote): Promise<SwapOrder>;
   getOrder(paymentHash: string): Promise<SwapOrder | null>;
   health(): Promise<boolean>;
+  getNodeInfo(): Promise<NodeInfo>;
 }
 const extractLightningInvoice = (value: ReceiveBtcResult['incoming_invoice']): string => {
   if (typeof value === 'string') return value;
@@ -26,6 +38,20 @@ const parseRpcAmount = (value: string | undefined, fallback: number): number => 
   const amount = Number(BigInt(value));
   if (!Number.isSafeInteger(amount) || amount < 0) throw new Error('CCH returned an unsafe amount');
   return amount;
+};
+const parseRpcCount = (value: unknown): number => {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error('FNN returned an unsafe count');
+    return value;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return 0;
+    const parsed = Number(BigInt(trimmed));
+    if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error('FNN returned an unsafe count');
+    return parsed;
+  }
+  return 0;
 };
 export class CchRpcError extends Error {
   constructor(public readonly code: number, message: string) {
@@ -59,14 +85,23 @@ export class MockCchGateway implements CchGateway {
     return record.order;
   }
   async health(): Promise<boolean> { return true; }
+  async getNodeInfo(): Promise<NodeInfo> {
+    return {
+      node_id: '03dfe0e6cc02a21ca3a971bc2fa05474872dc2acb91cc5defeb1f0566888536957',
+      addresses: ['/dns4/mock-provider.test/tcp/8443/wss'],
+      channel_count: 0,
+      peer_count: 0,
+    };
+  }
 }
 export class RpcCchGateway implements CchGateway {
   private readonly orders = new Map<string, SwapOrder>();
+  constructor(private readonly rpcUrl: string = config.fnnRpcUrl) {}
   private async call<T>(method: string, params: unknown[]): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
     try {
-      const response = await fetch(config.fnnRpcUrl, {
+      const response = await fetch(this.rpcUrl, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method, params }), signal: controller.signal,
       });
@@ -112,6 +147,24 @@ export class RpcCchGateway implements CchGateway {
   }
   async health(): Promise<boolean> {
     try { await this.call('node_info', []); return true; } catch { return false; }
+  }
+  async getNodeInfo(): Promise<NodeInfo> {
+    const raw = await this.call<FnnNodeInfoResult>('node_info', []);
+    const nodeId = raw.node_id ?? raw.pubkey;
+    if (!nodeId || typeof nodeId !== 'string') {
+      throw new Error('FNN node_info did not return a valid node_id or pubkey');
+    }
+    const addresses = Array.isArray(raw.addresses)
+      ? raw.addresses.filter((addr): addr is string => typeof addr === 'string')
+      : [];
+    const channelCount = parseRpcCount(raw.channel_count);
+    const peerCount = parseRpcCount(raw.peer_count ?? raw.peers_count);
+    return {
+      node_id: nodeId,
+      addresses,
+      channel_count: channelCount,
+      peer_count: peerCount,
+    };
   }
 }
 export const cchGateway: CchGateway = config.mode === 'rpc' ? new RpcCchGateway() : new MockCchGateway();

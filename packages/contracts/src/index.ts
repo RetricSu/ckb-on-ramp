@@ -31,3 +31,9 @@ export interface SwapOrder {
   failure_reason?: string;
 }
 export interface HealthResponse { ok: boolean; mode: Environment; fnn_reachable: boolean; }
+export interface NodeInfo {
+  node_id: string;
+  addresses: string[];
+  channel_count: number;
+  peer_count: number;
+}

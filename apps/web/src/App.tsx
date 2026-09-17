@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FiberNodeButton } from '@fiber-pay/react';
-import type { BootstrapSession, HealthResponse, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
+import type { BootstrapSession, HealthResponse, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
 import { ApiError, api } from './api';
 import { formatCwbtc, parseCwbtc, toHex } from './amount';
 import { CWBTC_ASSET, CWBTC_SCRIPT, FiberProvider, useFiber } from './FiberProvider';
@@ -25,6 +25,7 @@ function loadStoredOrder(): SwapOrder | null {
 function Workbench() {
   const fiber = useFiber();
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [operatorNode, setOperatorNode] = useState<NodeInfo | null>(null);
   const [bootstrap, setBootstrap] = useState<BootstrapSession | null>(null);
   const [amount, setAmount] = useState('0.000001');
   const [touched, setTouched] = useState(false);
@@ -35,7 +36,10 @@ function Workbench() {
   const [pollingStopped, setPollingStopped] = useState(false);
   const [copied, setCopied] = useState<'invoice' | 'command' | null>(null);
 
-  useEffect(() => { void api.health().then(setHealth).catch(() => setHealth(null)); }, []);
+  useEffect(() => {
+    void api.health().then(setHealth).catch(() => setHealth(null));
+    void api.nodeInfo().then(setOperatorNode).catch(() => setOperatorNode(null));
+  }, []);
   useEffect(() => {
     if (!order || pollingStopped || ['Success', 'Failed', 'Expired'].includes(order.status)) return;
     const timer = window.setInterval(() => {
@@ -129,6 +133,7 @@ function Workbench() {
 
             <dl className="node-facts">
               <div><dt>Browser node</dt><dd>{nodePubkey ? shorten(nodePubkey) : 'Create with the button above'}</dd></div>
+              <div><dt>Operator node</dt><dd>{operatorNode?.node_id ? shorten(operatorNode.node_id) : 'Unavailable'}</dd></div>
               <div><dt>Receive route</dt><dd>{routeReady ? 'Ready' : 'Not prepared'}</dd></div>
             </dl>
 

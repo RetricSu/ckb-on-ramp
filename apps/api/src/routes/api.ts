@@ -21,6 +21,18 @@ router.get('/health', async (_req, res) => {
   const fnnReachable = await cchGateway.health();
   res.json({ ok: config.mode === 'mock' || fnnReachable, mode: config.mode === 'mock' ? 'mock' : 'testnet', fnn_reachable: fnnReachable });
 });
+router.get('/node-info', async (_req, res, next) => {
+  try {
+    const info = await cchGateway.getNodeInfo();
+    res.json(info);
+  } catch (error) {
+    if (error instanceof CchRpcError) {
+      res.status(502).json({ error: error.message, upstream: true });
+      return;
+    }
+    next(error);
+  }
+});
 router.post('/bootstrap', async (req, res) => {
   try {
     const session = await prepareInboundLiquidity(String(req.body?.node_pubkey ?? ''));
