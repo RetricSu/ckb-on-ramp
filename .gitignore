@@ -3,3 +3,4 @@ dist/
 .env
 apps/web/public/vendor/
 *.tsbuildinfo
+screenshots/

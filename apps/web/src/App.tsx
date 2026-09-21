@@ -1,262 +1,83 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { FiberNodeButton } from '@fiber-pay/react';
-import type { BootstrapSession, HealthResponse, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
-import { ApiError, api } from './api';
-import { formatCwbtc, parseCwbtc, toHex } from './amount';
-import { CWBTC_ASSET, CWBTC_SCRIPT, FiberProvider, useFiber } from './FiberProvider';
-import { pickPeerAddress, prepareReceiveRoute } from './peer';
+import { FiberProvider } from './FiberProvider';
+import { useSwap } from './useSwap';
+import { Navbar } from './components/Navbar';
+import { SwapCard } from './components/SwapCard';
+import { SettlementModal } from './components/SettlementModal';
+import { ProgressModal } from './components/ProgressModal';
+import { HistoryDrawer } from './components/HistoryDrawer';
+import { AccountModal } from './components/AccountModal';
 
-type Busy = 'bootstrap' | 'quote' | 'order' | null;
-
-function shorten(value: string, head = 12, tail = 8) {
-  return value.length > head + tail + 1 ? `${value.slice(0, head)}…${value.slice(-tail)}` : value;
-}
-
-function loadStoredOrder(): SwapOrder | null {
-  try {
-    const value = localStorage.getItem('ckb-on-ramp:last-order');
-    if (!value) return null;
-    const order = JSON.parse(value) as Partial<SwapOrder>;
-    return order.payment_hash && order.lightning_invoice ? order as SwapOrder : null;
-  } catch {
-    return null;
-  }
-}
-
-function Workbench() {
-  const fiber = useFiber();
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [operatorNode, setOperatorNode] = useState<NodeInfo | null>(null);
-  const [bootstrap, setBootstrap] = useState<BootstrapSession | null>(null);
-  const [amount, setAmount] = useState('0.000001');
-  const [touched, setTouched] = useState(false);
-  const [quote, setQuote] = useState<Quote | null>(null);
-  const [order, setOrder] = useState<SwapOrder | null>(loadStoredOrder);
-  const [busy, setBusy] = useState<Busy>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [pollingStopped, setPollingStopped] = useState(false);
-  const [copied, setCopied] = useState<'invoice' | 'command' | null>(null);
-
-  useEffect(() => {
-    void api.health().then(setHealth).catch(() => setHealth(null));
-    void api.nodeInfo().then(setOperatorNode).catch(() => setOperatorNode(null));
-  }, []);
-  useEffect(() => {
-    if (!order || pollingStopped || ['Success', 'Failed', 'Expired'].includes(order.status)) return;
-    const timer = window.setInterval(() => {
-      void api.getOrder(order.payment_hash).then((next) => {
-        setOrder(next);
-        localStorage.setItem('ckb-on-ramp:last-order', JSON.stringify(next));
-      }).catch((reason: unknown) => {
-        setError(reason instanceof Error ? reason.message : String(reason));
-        if (reason instanceof ApiError && reason.status === 404) setPollingStopped(true);
-      });
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, [order?.payment_hash, order?.status, pollingStopped]);
-
-  const clearOrder = () => {
-    setOrder(null); setPollingStopped(false);
-    localStorage.removeItem('ckb-on-ramp:last-order');
-  };
-
-  const parsed = useMemo(() => {
-    try { return { raw: parseCwbtc(amount), error: null }; }
-    catch (reason) { return { raw: null, error: reason instanceof Error ? reason.message : String(reason) }; }
-  }, [amount]);
-  const nodePubkey = fiber.nodeInfo?.pubkey;
-  const peerAddress = useMemo(() => {
-    return bootstrap?.peer_address ?? pickPeerAddress(operatorNode?.addresses) ?? null;
-  }, [bootstrap?.peer_address, operatorNode?.addresses]);
-  const isProvisioning = bootstrap?.status === 'provisioning_liquidity';
-  const routeReady = bootstrap?.status === 'ready';
-  const canQuote = routeReady && parsed.raw !== null && !busy;
-
-  useEffect(() => {
-    if (!isProvisioning || !bootstrap?.session_id || bootstrap.channel_id) return;
-    const sessionId = bootstrap.session_id;
-    const timer = window.setInterval(async () => {
-      try {
-        const updated = await api.getBootstrapSession(sessionId);
-        if (updated.status === 'failed') {
-          setError(updated.message);
-          setBootstrap(updated);
-        } else if (updated.channel_id) {
-          setBootstrap(updated);
-        }
-      } catch (error) {
-        void error;
-        // Polling retry loop ignores transient network errors
-      }
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [isProvisioning, bootstrap?.session_id, bootstrap?.channel_id]);
-
-  useEffect(() => {
-    if (!isProvisioning || !fiber.node) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const res = await fiber.node?.listChannels({});
-        const readyChannel = res?.channels.find((ch) => {
-          const stateName = ch.state?.state_name?.toUpperCase();
-          return stateName === 'CHANNELREADY' || stateName === 'CHANNEL_READY';
-        });
-        if (readyChannel) {
-          setBootstrap((prev) => prev ? { ...prev, status: 'ready', channel_id: readyChannel.channel_id } : null);
-        }
-      } catch (error) {
-        void error;
-        // Polling retry loop ignores transient network errors
-      }
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [isProvisioning, fiber.node]);
-
-  const run = useCallback(async (kind: Exclude<Busy, null>, operation: () => Promise<void>) => {
-    setBusy(kind); setError(null);
-    try { await operation(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setBusy(null); }
-  }, []);
-
-  const prepareRoute = () => run('bootstrap', async () => {
-    const next = await prepareReceiveRoute({
-      nodePubkey,
-      defaultFundingLockScript: fiber.nodeInfo?.default_funding_lock_script,
-      connectPeer: fiber.node ? (params) => fiber.node!.connectPeer(params) : null,
-      getNodeInfo: () => api.nodeInfo(),
-      bootstrap: (request) => api.bootstrap(request),
-      mode: health?.mode,
-      onOperatorNode: setOperatorNode,
-    });
-    setBootstrap(next);
-  });
-  const requestQuote = () => run('quote', async () => {
-    if (!parsed.raw) throw new Error('Enter a valid cWBTC amount.');
-    setQuote(await api.quote(parsed.raw.toString())); clearOrder();
-  });
-  const createOrder = () => run('order', async () => {
-    if (!fiber.node || !quote) throw new Error('The Fiber node and quote must both be ready.');
-    const invoice = await fiber.node.newInvoice({
-      amount: toHex(BigInt(quote.receive_raw)), currency: 'Fibt', udt_type_script: CWBTC_SCRIPT,
-      hash_algorithm: 'sha256', final_expiry_delta: toHex(86_400n),
-      description: 'CKB On-ramp: BTC to cWBTC',
-    });
-    const next = await api.createOrder({ fiber_invoice: invoice.invoice_address, quote_id: quote.quote_id }, crypto.randomUUID());
-    setPollingStopped(false); setOrder(next); localStorage.setItem('ckb-on-ramp:last-order', JSON.stringify(next));
-  });
-  const copy = async (kind: 'invoice' | 'command', text: string) => {
-    await navigator.clipboard.writeText(text); setCopied(kind);
-    window.setTimeout(() => setCopied(null), 1600);
-  };
-  const reset = () => { setQuote(null); clearOrder(); setError(null); };
-  const lndCommand = order ? `lncli payinvoice --pay_req="${order.lightning_invoice}"` : '';
+function SwapApp() {
+  const swap = useSwap();
 
   return (
-    <>
-      <header className="nav">
-        <a className="wordmark" href="#main" aria-label="CKB On-ramp home">CKB / ON-RAMP</a>
-        <FiberNodeButton fiber={fiber} network="testnet" strategy="passkey" passkeyUsername="CKB On-ramp user" asset={CWBTC_ASSET} className="node-button" />
-      </header>
-      <main id="main" className="shell">
-        <section className="intro">
-          <div>
-            <p className="kicker">TESTNET · {health?.mode?.toUpperCase() ?? 'API OFFLINE'}</p>
-            <h1>BTC in. Your first CKB asset out.</h1>
+    <div className="app-shell">
+      <Navbar swap={swap} />
+
+      <main id="main" className="main-viewport">
+        <section className="swap-hero-section">
+          <div className="hero-text-block">
+            <h1 className="hero-headline">Instant BTC to CKB.</h1>
+            <p className="hero-lede">
+              Pay via Lightning Network, receive wrapped Bitcoin on CKB Fiber in seconds.
+              Non-custodial, zero-gas onboarding.
+            </p>
           </div>
-          <p className="lede">Create a Fiber node in this browser, pay one Lightning invoice from your own LND, and receive cWBTC without opening an exchange account.</p>
+
+          <SwapCard swap={swap} />
         </section>
 
-        <div className="workbench">
-          <ol className="steps" aria-label="Deposit steps">
-            <li className={fiber.isRunning ? 'complete' : 'active'}><span>1</span><div><strong>Start node</strong><small>Passkey-protected in this browser</small></div></li>
-            <li className={routeReady ? 'complete' : (fiber.isRunning || isProvisioning) ? 'active' : ''}><span>2</span><div><strong>Prepare route</strong><small>{isProvisioning ? 'Provisioning liquidity…' : 'Provider supplies inbound liquidity'}</small></div></li>
-            <li className={quote ? 'complete' : routeReady ? 'active' : ''}><span>3</span><div><strong>Set amount</strong><small>Review amount and operator fee</small></div></li>
-            <li className={order ? 'active' : ''}><span>4</span><div><strong>Pay from LND</strong><small>Keys and macaroon stay with you</small></div></li>
-          </ol>
-
-          <section className="panel" aria-live="polite">
-            <div className="panel-heading">
-              <div><h2>Receive cWBTC</h2><p>The node invoice and Lightning invoice share one SHA-256 payment hash.</p></div>
-              <span className={`status ${fiber.isRunning ? 'status-success' : ''}`}>{fiber.isRunning ? 'NODE READY' : 'NODE OFFLINE'}</span>
+        <section className="features-strip">
+          <div className="feature-item">
+            <div className="feature-icon">⚡</div>
+            <div className="feature-text">
+              <strong>Instant Atomic Settlement</strong>
+              <p>Direct cross-chain Lightning ⇄ Fiber hop via CCH without exchange waiting periods.</p>
             </div>
+          </div>
 
-            <dl className="node-facts">
-              <div><dt>Browser node</dt><dd>{nodePubkey ? shorten(nodePubkey) : 'Create with the button above'}</dd></div>
-              <div><dt>Operator node</dt><dd>{operatorNode?.node_id ? shorten(operatorNode.node_id) : 'Unavailable'}</dd></div>
-              <div><dt>Peer address</dt><dd title={peerAddress ?? undefined}>{peerAddress ? shorten(peerAddress, 14, 10) : (operatorNode ? 'None' : 'Unavailable')}</dd></div>
-              <div><dt>Receive route</dt><dd>{routeReady ? 'Ready' : isProvisioning ? 'Provisioning liquidity…' : 'Not prepared'}</dd></div>
-            </dl>
+          <div className="feature-item">
+            <div className="feature-icon">🛡️</div>
+            <div className="feature-text">
+              <strong>Non-Custodial Passkey</strong>
+              <p>Your browser node signs off-chain invoices locally with Face ID or Touch ID.</p>
+            </div>
+          </div>
 
-            {!routeReady && (
-              <div className="action-block">
-                <p>
-                  {isProvisioning
-                    ? 'Operator has gifted CKB capacity and initiated channel opening. Channel acceptance is in progress in the background.'
-                    : 'A fresh node cannot receive until a service peer opens or provisions a route with inbound UDT liquidity.'}
-                </p>
-                {isProvisioning ? (
-                  <div className="notice" role="status">
-                    <strong>Opening channel…</strong> The browser node is accepting the incoming channel. Keep this page open.
-                  </div>
-                ) : (
-                  <button className="button primary" onClick={() => void prepareRoute()} disabled={!fiber.isRunning || busy !== null}>
-                    {busy === 'bootstrap' ? 'Preparing…' : 'Prepare receive route'}
-                  </button>
-                )}
-                {!fiber.isRunning && <p className="helper">Start the Fiber node first. Its private key remains browser-side.</p>}
-              </div>
-            )}
-
-            {routeReady && !order && (
-              <div className="form-block">
-                <label htmlFor="amount">cWBTC to receive</label>
-                <div className="amount-row">
-                  <input id="amount" inputMode="decimal" value={amount} onChange={(event) => { setAmount(event.target.value); setQuote(null); }} onBlur={() => setTouched(true)} aria-invalid={touched && !!parsed.error} aria-describedby="amount-help" />
-                  <span>cWBTC</span>
-                </div>
-                <p id="amount-help" className={touched && parsed.error ? 'helper error' : 'helper'}>{touched && parsed.error ? parsed.error : 'cWBTC uses 8 decimals. One raw unit maps to one sat in the current CCH model.'}</p>
-                {!quote ? (
-                  <button className="button primary" onClick={() => void requestQuote()} disabled={!canQuote}>{busy === 'quote' ? 'Quoting…' : 'Review quote'}</button>
-                ) : (
-                  <div className="quote">
-                    <dl><div><dt>You receive</dt><dd>{formatCwbtc(quote.receive_raw)} cWBTC</dd></div><div><dt>You pay</dt><dd>{quote.pay_sats.toLocaleString()} sats</dd></div><div><dt>Operator fee</dt><dd>{quote.fee_sats.toLocaleString()} sats</dd></div></dl>
-                    <div className="quote-actions">
-                      <button className="button primary" onClick={() => void createOrder()} disabled={busy !== null}>{busy === 'order' ? 'Creating invoice…' : 'Create Lightning invoice'}</button>
-                      <button className="button secondary" onClick={() => setQuote(null)} disabled={busy !== null}>Change amount</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {order && (
-              <div className="payment-block">
-                <div className="payment-status"><span className={`status ${order.status === 'Success' ? 'status-success' : ''}`}>{order.status.toUpperCase()}</span><span>{order.pay_sats.toLocaleString()} sats</span></div>
-                <label>Lightning invoice</label>
-                <code className="invoice">{order.lightning_invoice}</code>
-                <div className="button-row">
-                  <button className="button primary" onClick={() => void copy('invoice', order.lightning_invoice)}>{copied === 'invoice' ? 'Copied' : 'Copy invoice'}</button>
-                  <button className="button secondary" onClick={() => void copy('command', lndCommand)}>{copied === 'command' ? 'Copied' : 'Copy lncli command'}</button>
-                </div>
-                <pre><code>{lndCommand}</code></pre>
-                <p className="helper">Run this on the machine that owns your LND credentials. Keep this tab and the Fiber node open until settlement. Never paste a macaroon or seed into this site.</p>
-                {order.status === 'Success' && <div className="success-message"><strong>Settlement complete.</strong><span>{formatCwbtc(order.receive_raw)} cWBTC was paid to the Fiber invoice created by this browser node.</span></div>}
-                {['Success', 'Failed', 'Expired'].includes(order.status) && <button className="button secondary" onClick={reset}>Start another deposit</button>}
-              </div>
-            )}
-            {error && <div className="error-box" role="alert"><strong>The step did not complete.</strong><span>{error}</span>{pollingStopped && <button className="button secondary" onClick={reset}>Discard saved order</button>}</div>}
-          </section>
-        </div>
-
-        <section className="trust">
-          <h2>What stays where</h2>
-          <dl><div><dt>In your browser</dt><dd>Fiber identity, invoice signing, local node storage.</dd></div><div><dt>On your LND machine</dt><dd>Bitcoin keys, macaroon, TLS credentials, payment approval.</dd></div><div><dt>With the operator</dt><dd>Quote, public Fiber node id, channel provisioning, CCH order status.</dd></div></dl>
+          <div className="feature-item">
+            <div className="feature-icon">🎁</div>
+            <div className="feature-text">
+              <strong>Sponsored Inbound Route</strong>
+              <p>Scheme B zero-CKB channel setup means you don&apos;t need CKB tokens to get started.</p>
+            </div>
+          </div>
         </section>
       </main>
-      <footer><p>CKB On-ramp · Testnet scaffold · No custody of LND credentials</p></footer>
-    </>
+
+      <footer className="app-footer">
+        <div className="footer-content">
+          <p>CKB On-ramp · Powered by Fiber Network & Lightning CCH · Testnet Edition</p>
+          <div className="footer-links">
+            <span>Non-custodial</span>
+            <span>·</span>
+            <span>No seed phrase export needed</span>
+          </div>
+        </div>
+      </footer>
+
+      {/* Modals and Drawers */}
+      <SettlementModal swap={swap} />
+      <ProgressModal swap={swap} />
+      <HistoryDrawer swap={swap} />
+      <AccountModal swap={swap} />
+    </div>
   );
 }
 
-export function App() { return <FiberProvider><Workbench /></FiberProvider>; }
+export function App() {
+  return (
+    <FiberProvider>
+      <SwapApp />
+    </FiberProvider>
+  );
+}
