@@ -113,6 +113,37 @@ Operator 通过 `connect_peer` 成功连接 User 本地 multiaddr（端口 18228
    - 返回结果：`status = "Created"`, `fee = "0x0"`, `failed_error = null`。
    - 日志证据：路由图成功构建一跳路径（`build_route: amount: 1000000, amount_low_bound: Some(1), max_fee_amount: Some(5000)`），未产生实际扣款或链上状态变动。证明通过该通道自 Operator 向 User 进行 cWBTC 路由支付完全可用。
 
+### 步骤 7：真实 UDT 结算到账与双向支付流转实测（PASS）
+
+基于本地管理节点（Operator `127.0.0.1:18327` 与 User-Zero `127.0.0.1:18427`）和本地 `fiber-pay`、`offckb` 工具，推进实测了真实 UDT 的入账、Preimage 披露与双向路由流转：
+
+1. **真实 UDT 入向支付（Operator → User-Zero，非 dry-run）**：
+   - **发票生成**：User-Zero 调用 `new_invoice` 生成真实 SHA-256 发票，金额 `0x186a0`（100,000 raw = 0.001 cWBTC），Payment Hash：`0x043d4734de6a6380dcc737fb00027f19dd6071dbaa51e32898f4981017e6a75f`。
+   - **真实支付**：Operator 调用 `send_payment` 发起实际支付，返回 `status: "Created"`；轮询 `get_payment` 确认状态跃迁为 **`status: "Success"`**（手续费 `0x0`）。
+   - **接收端状态与余额变动**：
+     - User-Zero 侧查询 `get_invoice` 显示 **`status: "Paid"`**。
+     - User-Zero 通道 `local_balance` 从 **`0x0`** 真实增长为 **`0x186a0`**（0.001 cWBTC 到账！）。
+     - User-Zero 通道 `remote_balance` 从 `0x5f5e100` 相应缩减为 `0x5f45a60`（0.999 cWBTC）。
+     - Commitment Tx 哈希自 `0xebcb7516...` 推进至 `0x8cce8444...`。
+   - **Operator 端余额变动**：
+     - Operator 通道 `local_balance` 扣减为 `0x5f45a60`，`remote_balance` 增长为 `0x186a0`。
+
+2. **反向支付流转（User-Zero → Operator）**：
+   - Operator 生成反向发票，金额 `0x2710`（10,000 raw = 0.0001 cWBTC），Payment Hash：`0x65140a79dc9614dbc234464623916f115e7224c962825b10c52c6c582a621b34`。
+   - User-Zero 通过 `fiber-pay --data-dir /tmp/ckb-on-ramp-poc/user-zero payment send` 成功支付。
+   - Operator 发票确认为 **`status: "Paid"`**。
+   - 结算后最终通道余额：
+     - User-Zero 端：`local_balance = 0x15f90` (0.0009 cWBTC), `remote_balance = 0x5f48170` (0.9991 cWBTC)。
+     - Operator 端：`local_balance = 0x5f48170`, `remote_balance = 0x15f90`。
+
+3. **本地运维工具校验**：
+   - **`fiber-pay node ready`**：User-Zero 报告 `channelsReady: 1, canSend: true, canReceive: true, recommendation: READY`。
+   - **`offckb balance --network testnet --no-udt`**：User-Zero 链上余额确认为 `9815.99899754 CKB`，锁定容量储备完好无损。
+
+**结论**：
+通过真实交易证明，原本 0-CKB 资产的接收节点在 Scheme B 资助建渠后，不仅可以稳定接收入向 UDT 支付，而且进入完整的双向可用 Layer2 支付状态机。
+目前端到端仅剩外部 CCH / LND 的连通（用户支付 BTC 驱动 CCH 自动触发上述 `send_payment` 并结算 hold invoice 的外部网络编排）。
+
 ## 关键架构结论与后续约束
 
 1. **Bootstrap 机制的硬性要求与 Scheme B 定位**：
@@ -144,9 +175,9 @@ PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性，当前推
    - 浏览器 Fiber 节点启动后自动轮询 `listChannels({ only_pending: true })`，遇到入向要约主动执行 `acceptChannel({ temporary_channel_id, funding_amount: '0x0' })`，严格以 0 CKB 出资完成握手；无 pending 通道或 mock 模式自动 skip。
 4. **Scheme B 自动化 Bootstrap 充资与开渠（已完成 Phase-1 CCC + FNN 链路）**：
    - 针对 live FNN 缺失 `send_ckb` RPC 的限制，引入 `@ckb-ccc/core` SDK 与 `OPERATOR_CKB_PRIVATE_KEY` 环境变量，实现 `CccOperatorCkbSender` 向用户 `funding_address` 发送 ≥200 CKB 容量预资助并在链上等待确认，随后调用 FNN `open_channel` 发起 cWBTC 通道开通并返回 `provisioning_liquidity` 状态。未配置密钥时保持 501 fail-closed。前端将 `provisioning_liquidity` 视作进行中状态，结合 0-CKB 接受器自动完成建渠协商。
-5. **节点真实 UDT 余额证明（Balance Proof）**：
-   - 前后端打通通道状态轮询与 UDT 余额证明逻辑，确保用户支付 BTC 后，可在前端通过 Fiber WASM 节点验证 cWBTC `local_balance` 实际入账。
-6. **Passkey / IndexedDB 浏览器 WASM 端到端（E2E）**：
+5. **节点真实 UDT 余额证明与通道双向流转（已完成步骤 7 实测验证）**：
+   - 针对 Scheme B 开通的 0-CKB 用户通道，通过 Operator 向 User-Zero 的真实 SHA-256 invoice 发起 `send_payment`（非 dry-run），实测验证了通道 Commitment tx 推进、UDT 到账（`local_balance` 从 `0x0` 增长至 `0x186a0` 即 0.001 cWBTC）及发票状态跃迁为 `Paid`；并实测了 User-Zero 向 Operator 的反向流转支付，确认节点 `READY` 与双向支付能力。
+6. **Passkey / IndexedDB 浏览器 WASM 端到端（E2E，待前端交互验证）**：
    - 在真实浏览器环境中测试完整生命周期：Passkey 创建与恢复、私钥解密导入 WASM 节点、IndexedDB 跨页面刷新数据持久化、通道恢复与 invoice 签署。
-7. **BTC Testnet 外部链路闭环（解除步骤 7 阻塞）**：
-   - 接入真实的 CCH 服务商与 LND 节点，跑通实际 hold invoice 支付、preimage 释放与两阶段结算。
+7. **BTC Testnet 外部链路闭环（解除外部 CCH / LND 阻塞）**：
+   - 接入外部真实的 CCH 服务商与 LND 节点，跑通实际 hold invoice 支付、preimage 释放与两阶段结算。
