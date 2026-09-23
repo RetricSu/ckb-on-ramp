@@ -24,6 +24,13 @@ npm install
 npm run dev
 ```
 
+To exercise the full Lightning → Fiber path on your machine (local LND, offckb CKB, fiber-pay FNN), see [ops/README.md](ops/README.md):
+
+```bash
+npm run stack:up
+npm run stack:e2e
+```
+
 - Web: `http://localhost:5173`
 - API: `http://localhost:3001`
 

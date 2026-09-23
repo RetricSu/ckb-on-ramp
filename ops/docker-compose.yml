@@ -1,0 +1,92 @@
+# Local Bitcoin regtest + two LND nodes for CCH e2e.
+# lnd-cch  = operator / Ingrid (hold invoices)   grpc 10009
+# lnd-user = developer paying node (Bob)         grpc 11009
+name: ckb-on-ramp-ln
+
+services:
+  bitcoind:
+    image: bitcoin/bitcoin:28.1
+    command:
+      - -regtest=1
+      - -server=1
+      - -txindex=1
+      - -fallbackfee=0.0002
+      - -rpcuser=btc
+      - -rpcpassword=btc
+      - -rpcport=18443
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -port=18444
+      - -zmqpubrawblock=tcp://0.0.0.0:28332
+      - -zmqpubrawtx=tcp://0.0.0.0:28333
+      - -printtoconsole=1
+      - -acceptnonstdtxn=1
+    ports:
+      - "18443:18443"
+      - "18444:18444"
+    volumes:
+      - ./data/bitcoind:/home/bitcoin/.bitcoin
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=btc", "-rpcpassword=btc", "getblockchaininfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 40
+      start_period: 5s
+
+  lnd-cch:
+    image: lightninglabs/lnd:v0.18.5-beta
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+    command:
+      - --noseedbackup
+      - --alias=cch
+      - --tlsextradomain=lnd-cch
+      - --tlsextradomain=localhost
+      - --tlsextraip=127.0.0.1
+      - --listen=0.0.0.0:9735
+      - --rpclisten=0.0.0.0:10009
+      - --restlisten=0.0.0.0:8080
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=btc
+      - --bitcoind.rpcpass=btc
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+    ports:
+      - "10009:10009"
+      - "8080:8080"
+      - "9735:9735"
+    volumes:
+      - ./data/lnd-cch:/root/.lnd
+
+  lnd-user:
+    image: lightninglabs/lnd:v0.18.5-beta
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+    command:
+      - --noseedbackup
+      - --alias=user
+      - --tlsextradomain=lnd-user
+      - --tlsextradomain=localhost
+      - --tlsextraip=127.0.0.1
+      - --listen=0.0.0.0:9735
+      - --rpclisten=0.0.0.0:10009
+      - --restlisten=0.0.0.0:8080
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=btc
+      - --bitcoind.rpcpass=btc
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+    ports:
+      - "11009:10009"
+      - "8180:8080"
+      - "9835:9735"
+    volumes:
+      - ./data/lnd-user:/root/.lnd

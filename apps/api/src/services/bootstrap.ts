@@ -50,6 +50,7 @@ export interface BootstrapDependencies {
   operatorPrivateKey?: string;
   ckbRpcUrl?: string;
   channelFundingAmount?: string;
+  skipCapacityGift?: boolean;
 }
 
 export async function prepareInboundLiquidity(
@@ -59,7 +60,8 @@ export async function prepareInboundLiquidity(
   const validated = validateBootstrapRequest(input);
 
   const operatorPrivateKey = dependencies?.operatorPrivateKey ?? config.operatorCkbPrivateKey;
-  if (!operatorPrivateKey) {
+  const skipCapacityGift = dependencies?.skipCapacityGift ?? config.skipCapacityGift;
+  if (!operatorPrivateKey && !skipCapacityGift) {
     return {
       session_id: randomUUID(),
       status: 'failed',
@@ -68,13 +70,14 @@ export async function prepareInboundLiquidity(
   }
 
   try {
-    const sender =
-      dependencies?.operatorCkbSender ??
-      new CccOperatorCkbSender(operatorPrivateKey, dependencies?.ckbRpcUrl ?? config.ckbRpcUrl);
     const gateway = dependencies?.cchGateway ?? cchGateway;
+    const sender = skipCapacityGift
+      ? undefined
+      : dependencies?.operatorCkbSender ??
+        new CccOperatorCkbSender(operatorPrivateKey!, dependencies?.ckbRpcUrl ?? config.ckbRpcUrl);
 
-    // 1. Submit ≥200 CKB capacity gift to funding_address via CCC SignerCkbPrivateKey (non-blocking)
-    const giftResult = await sender.sendCapacityGift(validated.funding_address, 200);
+    // 1. Submit ≥200 CKB capacity gift unless local e2e skips it (offckb accounts are pre-funded).
+    const giftResult = sender ? await sender.sendCapacityGift(validated.funding_address, 200) : undefined;
 
     // 2. Fetch peer address best-effort
     let peerAddress: string | undefined;
@@ -92,8 +95,10 @@ export async function prepareInboundLiquidity(
       session_id: sessionId,
       status: 'provisioning_liquidity',
       peer_address: peerAddress,
-      gift_tx_hash: giftResult.txHash,
-      message: `Operator capacity gift submitted (tx: ${giftResult.txHash}). Waiting for CKB confirmation and channel opening.`,
+      gift_tx_hash: giftResult?.txHash,
+      message: giftResult
+        ? `Operator capacity gift submitted (tx: ${giftResult.txHash}). Waiting for CKB confirmation and channel opening.`
+        : 'Skipping CKB capacity gift (SKIP_CAPACITY_GIFT=1). Opening inbound UDT channel.',
     };
 
     trimOldest(sessions);
@@ -106,7 +111,7 @@ export async function prepareInboundLiquidity(
 
     const task = (async () => {
       try {
-        if (sender.waitForTransaction) {
+        if (sender?.waitForTransaction && giftResult?.txHash) {
           await sender.waitForTransaction(giftResult.txHash);
         }
         const openResult = await gateway.openChannel({
@@ -120,7 +125,9 @@ export async function prepareInboundLiquidity(
         if (existing) {
           existing.channel_id = openResult.channel_id;
           existing.status = 'provisioning_liquidity';
-          existing.message = `Operator capacity gift confirmed (tx: ${giftResult.txHash}). Channel opening initiated (${openResult.channel_id}). Channel acceptance in progress.`;
+          existing.message = giftResult
+            ? `Operator capacity gift confirmed (tx: ${giftResult.txHash}). Channel opening initiated (${openResult.channel_id}). Channel acceptance in progress.`
+            : `Channel opening initiated (${openResult.channel_id}). Channel acceptance in progress.`;
         }
       } catch (err) {
         const rawMsg = err instanceof Error ? err.message : String(err);
