@@ -114,12 +114,15 @@ export class MockCchGateway implements CchGateway {
 }
 export class RpcCchGateway implements CchGateway {
   private readonly orders = new Map<string, SwapOrder>();
-  constructor(private readonly rpcUrl: string = config.fnnRpcUrl) {}
-  private async call<T>(method: string, params: unknown[]): Promise<T> {
+  constructor(
+    private readonly fiberRpcUrl: string = config.fnnRpcUrl,
+    private readonly cchRpcUrl: string = config.cchRpcUrl,
+  ) {}
+  private async call<T>(method: string, params: unknown[], rpcUrl = this.cchRpcUrl, timeoutMs = 10_000): Promise<T> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(this.rpcUrl, {
+      const response = await fetch(rpcUrl, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method, params }), signal: controller.signal,
       });
@@ -131,7 +134,7 @@ export class RpcCchGateway implements CchGateway {
     } finally { clearTimeout(timeout); }
   }
   async createOrder(input: CreateOrderRequest, quote: Quote): Promise<SwapOrder> {
-    const result = await this.call<ReceiveBtcResult>('receive_btc', [{ fiber_pay_req: input.fiber_invoice }]);
+    const result = await this.call<ReceiveBtcResult>('receive_btc', [{ fiber_pay_req: input.fiber_invoice }], this.cchRpcUrl, 60_000);
     const paySats = parseRpcAmount(result.amount_sats, quote.pay_sats);
     const feeSats = parseRpcAmount(result.fee_sats, quote.fee_sats);
     const order: SwapOrder = {
@@ -146,7 +149,7 @@ export class RpcCchGateway implements CchGateway {
   }
   async getOrder(paymentHash: string): Promise<SwapOrder | null> {
     const local = this.orders.get(paymentHash);
-    const result = await this.call<ReceiveBtcResult>('get_cch_order', [{ payment_hash: paymentHash }]);
+    const result = await this.call<ReceiveBtcResult>('get_cch_order', [{ payment_hash: paymentHash }], this.cchRpcUrl, 30_000);
     const paySats = parseRpcAmount(result.amount_sats, local?.pay_sats ?? 0);
     const feeSats = parseRpcAmount(result.fee_sats, local?.fee_sats ?? 0);
     const order: SwapOrder = {
@@ -164,10 +167,10 @@ export class RpcCchGateway implements CchGateway {
     return order;
   }
   async health(): Promise<boolean> {
-    try { await this.call('node_info', []); return true; } catch { return false; }
+    try { await this.call('node_info', [], this.fiberRpcUrl); return true; } catch { return false; }
   }
   async getNodeInfo(): Promise<NodeInfo> {
-    const raw = await this.call<FnnNodeInfoResult>('node_info', []);
+    const raw = await this.call<FnnNodeInfoResult>('node_info', [], this.fiberRpcUrl);
     const nodeId = raw.node_id ?? raw.pubkey;
     if (!nodeId || typeof nodeId !== 'string') {
       throw new Error('FNN node_info did not return a valid node_id or pubkey');
@@ -185,7 +188,7 @@ export class RpcCchGateway implements CchGateway {
     };
   }
   async openChannel(params: OpenChannelParams): Promise<OpenChannelResult> {
-    const raw = await this.call<{ channel_id?: string; temporary_channel_id?: string }>('open_channel', [params]);
+    const raw = await this.call<{ channel_id?: string; temporary_channel_id?: string }>('open_channel', [params], this.fiberRpcUrl, 30_000);
     const channelId = raw.channel_id ?? raw.temporary_channel_id;
     if (!channelId || typeof channelId !== 'string') {
       throw new Error('FNN open_channel did not return a valid channel_id');

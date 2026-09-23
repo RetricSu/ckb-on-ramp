@@ -9,7 +9,11 @@
     "build": "npm run build -w @ckb-on-ramp/contracts && npm run build -w @ckb-on-ramp/api && npm run build -w @ckb-on-ramp/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "postinstall": "npm run vendor:fiber -w @ckb-on-ramp/web"
+    "postinstall": "npm run vendor:fiber -w @ckb-on-ramp/web",
+    "stack:up": "bash ops/stack.sh up",
+    "stack:down": "bash ops/stack.sh down",
+    "stack:status": "bash ops/stack.sh status",
+    "stack:e2e": "bash ops/stack.sh e2e"
   },
   "engines": { "node": ">=22" },
   "devDependencies": { "concurrently": "9.2.4" }

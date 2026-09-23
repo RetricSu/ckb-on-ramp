@@ -4,3 +4,5 @@ dist/
 apps/web/public/vendor/
 *.tsbuildinfo
 screenshots/
+ops/data/
+ops/runtime.env
