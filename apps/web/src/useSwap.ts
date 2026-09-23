@@ -10,6 +10,9 @@ import { loadReceipts, orderToReceipt, saveReceipt, updateReceiptStatus } from '
 import type { SwapReceipt, SwapStep } from './types';
 
 const LAST_ORDER_KEY = 'ckb-on-ramp:last-order';
+// Fiber invoice final_expiry_delta is milliseconds. Node min is 9_600_000 (160 min);
+// CCH also requires it < half of BTC CLTV (~108_000_000 ms). 24h sits in that window.
+const FIBER_INVOICE_FINAL_EXPIRY_DELTA_MS = 86_400_000n;
 
 export function isCwbtcChannel(channel?: Channel | null): boolean {
   if (!channel || !channel.funding_udt_type_script) return false;
@@ -488,7 +491,7 @@ export function useSwap() {
         currency: 'Fibt',
         udt_type_script: CWBTC_SCRIPT,
         hash_algorithm: 'sha256',
-        final_expiry_delta: toHex(86_400n),
+        final_expiry_delta: toHex(FIBER_INVOICE_FINAL_EXPIRY_DELTA_MS),
         description: 'CKB On-ramp: BTC to cWBTC',
       });
 
