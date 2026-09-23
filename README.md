@@ -9,7 +9,7 @@ CKB On-ramp is an early scaffold for a non-custodial first-deposit flow:
 5. the user pays that invoice from their own LND node;
 6. the CCH order settles the wrapped-BTC UDT to the browser Fiber node.
 
-The backend operates against testnet with real RPC endpoints (FNN CCH actor and CKB node via CCC). If `OPERATOR_CKB_PRIVATE_KEY` is not configured, inbound-liquidity provisioning fails closed (HTTP 501). End-to-end deposits depend on live testnet infrastructure and are not claimed to be fully working without active external CCH settlement and testnet funding.
+The backend operates against testnet with real RPC endpoints (FNN CCH actor and CKB node via CCC). If `OPERATOR_CKB_PRIVATE_KEY` is not configured, inbound-liquidity provisioning fails closed (HTTP 501). A developer testnet path (local operator FNN+CCH, local regtest LND, cWBTC faucet) has been exercised end-to-end; it is not a production deposit service. Next change to bootstrap is operator **external funding** so CKB is never sent to the user as a spendable cell — see [docs/external-funding-lsp.md](docs/external-funding-lsp.md).
 
 ## Why the bootstrap exists
 
@@ -51,6 +51,7 @@ Copy `.env.example` to `.env` to override defaults.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `FNN_RPC_URL` | `http://127.0.0.1:8227` | Operator Fiber node JSON-RPC |
+| `CCH_RPC_URL` | _(same as FNN)_ | Standalone CCH RPC; omit when CCH runs in-process |
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowed web origin |
 | `CCH_BASE_FEE_SATS` | `100` | Quote base fee; must match FNN |
 | `CCH_FEE_RATE_PPM` | `3000` | Quote proportional fee; must match FNN |

@@ -131,3 +131,5 @@ npm run dev
 If port 5173 is already taken, stop that process or run the web app on another port and set `CORS_ORIGIN` to match.
 
 More cWBTC: paste the operator funding address into https://faucet-cwbtc.ckb.dev/ (cooldown 24h per address).
+
+Phase-1 still gifts spendable CKB to the user address (empty-channel force-close farming). Next: operator external funding — [docs/external-funding-lsp.md](../docs/external-funding-lsp.md).

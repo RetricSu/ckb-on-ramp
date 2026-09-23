@@ -1,8 +1,24 @@
 # CKB On-ramp handoff
 
-更新时间：2026-09-17
+更新时间：2026-09-23
 
-## 当前交付状态
+## 当前交付状态（2026-09-23）
+
+**Testnet 浏览器入金主路径已在本机跑通**（仍是 scaffold / 开发者环境，不是对外宣称的生产充值）：
+
+1. 浏览器 WASM Fiber 节点（testnet + passkey）连运营方 `127.0.0.1:8228/ws`。
+2. Scheme B：`OPERATOR_CKB_PRIVATE_KEY` 向用户 `funding_address` 打 ≥200 CKB，FNN `open_channel` 出 1 cWBTC，用户 `acceptChannel(0x0)`。
+3. 浏览器 `newInvoice({ sha256, Fibt, final_expiry_delta: 86_400_000 ms })`（单位必须是毫秒；曾误传 86400 被节点以 min 9_600_000 拒绝）。
+4. 运营方 FNN 开 CCH（`wrapped_btc_type_script` 必须写完整 cWBTC JSON，不能只写 args，否则 CCH actor 按 SimpleUDT 取合约 panic）。
+5. 用户用**本地 regtest LND** 付返回的 `lnbcrt…` hold invoice；CCH 付 Fiber 发票，订单 Success，cWBTC 到浏览器节点。
+
+cWBTC 用 https://faucet-cwbtc.ckb.dev/ 申领。本地 LND / 运营方进程见 [ops/README.md](../ops/README.md)。
+
+**下一步不是再做退出脚本回收 184 CKB**（force close 无视 `shutdown_script`，空通道刷赞助才是真问题），而是改成运营方**外部出资**开渠：用户当 opener 调 `open_channel_with_external_funding`，API 签 funding tx，找零回运营方。详见 [external-funding-lsp.md](./external-funding-lsp.md)。
+
+---
+
+## 2026-09-17 交付状态（历史）
 
 仓库已经有一个可运行的 mock vertical slice：浏览器 Fiber WASM 节点、报价、Fiber SHA-256 invoice、后端 CCH adapter、LND BOLT11 展示、订单轮询和恢复错误态。
 已完成 `/api/node-info` 端点与前端 `connect_peer` 连通链路，并实现了前端浏览器 Fiber 节点对入向通道要约的 0-CKB 自动接受轮询器（`funding_amount: '0x0'`，绝不触发 99 CKB auto-accept）。
@@ -165,7 +181,7 @@ Operator 通过 `connect_peer` 成功连接 User 本地 multiaddr（端口 18228
 
 ## 后续任务清单（Forward Tasks）
 
-PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性，当前推进进展与后续任务如下：
+PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性。2026-09-23 起浏览器 testnet + 本地 LND 的 CCH 闭环已打通（见文首）。当前推进：
 
 1. **`/api/node-info` 端点实现（已完成）**：
    - 后端服务已提供真实的 Operator 节点信息接口（包含 Operator Pubkey、P2P 监听 multiaddr / WSS 地址、通道数与 peer 数），支持 mock 与 rpc 模式。
@@ -177,7 +193,9 @@ PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性，当前推
    - 针对 live FNN 缺失 `send_ckb` RPC 的限制，引入 `@ckb-ccc/core` SDK 与 `OPERATOR_CKB_PRIVATE_KEY` 环境变量，实现 `CccOperatorCkbSender` 向用户 `funding_address` 发送 ≥200 CKB 容量预资助并在链上等待确认，随后调用 FNN `open_channel` 发起 cWBTC 通道开通并返回 `provisioning_liquidity` 状态。未配置密钥时保持 501 fail-closed。前端将 `provisioning_liquidity` 视作进行中状态，结合 0-CKB 接受器自动完成建渠协商。
 5. **节点真实 UDT 余额证明与通道双向流转（已完成步骤 7 实测验证）**：
    - 针对 Scheme B 开通的 0-CKB 用户通道，通过 Operator 向 User-Zero 的真实 SHA-256 invoice 发起 `send_payment`（非 dry-run），实测验证了通道 Commitment tx 推进、UDT 到账（`local_balance` 从 `0x0` 增长至 `0x186a0` 即 0.001 cWBTC）及发票状态跃迁为 `Paid`；并实测了 User-Zero 向 Operator 的反向流转支付，确认节点 `READY` 与双向支付能力。
-6. **Passkey / IndexedDB 浏览器 WASM 端到端（E2E，待前端交互验证）**：
-   - 在真实浏览器环境中测试完整生命周期：Passkey 创建与恢复、私钥解密导入 WASM 节点、IndexedDB 跨页面刷新数据持久化、通道恢复与 invoice 签署。
-7. **BTC Testnet 外部链路闭环（解除外部 CCH / LND 阻塞）**：
-   - 接入外部真实的 CCH 服务商与 LND 节点，跑通实际 hold invoice 支付、preimage 释放与两阶段结算。
+6. **Passkey / IndexedDB 浏览器 WASM 端到端（部分完成）**：
+   - 本机已用 passkey 起 WASM 节点并完成一笔 testnet 入金。跨刷新恢复、换机、Safari/Firefox 仍未系统测。
+7. **BTC / CCH 闭环（开发者环境已完成；主网/公网 LND 未做）**：
+   - 运营方 FNN 进程内 CCH + 本地 regtest LND 已跑通 hold invoice。用户侧仍是自己的 LND（本机 `lnd-user`），后端不托管 macaroon。
+8. **运营方外部出资开渠（下一步，见 [external-funding-lsp.md](./external-funding-lsp.md)）**：
+   - 停止把可花 CKB 打到用户 secp。用户 WASM 发起 `open_channel_with_external_funding`，`POST /api/sign-funding` 验 tx 后签名，找零回运营方。先 spike 三件事：0 UDT / 运营方出 cWBTC / 用户地址 0 dust；再处理 gift 钱包 UTXO 并发（预拆小 Cell + inflight 拒签 + 重试）。
