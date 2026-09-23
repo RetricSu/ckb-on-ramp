@@ -102,3 +102,32 @@ npm run stack:up
 ```
 
 `offckb clean` deletes the local CKB chain. It does not touch this git repo.
+
+## Testnet (web app)
+
+The Vite app talks to CKB **testnet** Fiber + the local LND pair. A testnet operator FNN with in-process CCH lives at `ops/data/testnet-operator/` (gitignored).
+
+Already wired on this machine:
+
+- Operator Fiber/CCH RPC `http://127.0.0.1:8227` (WS P2P `127.0.0.1:8228`)
+- Operator funded with testnet CKB + 100 cWBTC from https://faucet-cwbtc.ckb.dev/
+- Gift wallet in `.env` as `OPERATOR_CKB_PRIVATE_KEY` (~10k CKB for Scheme B)
+- User pays hold invoices with local `lnd-user` (regtest)
+
+Restart the operator after a reboot:
+
+```bash
+# keep LND up
+npm run stack:up   # or: bash ops/stack.sh lightning
+
+DIR="$(pwd)/ops/data/testnet-operator"
+fiber-pay --data-dir "$DIR" --network testnet \
+  --key-password "$(cat "$DIR/.key-password")" \
+  node start --daemon --quiet-fnn
+
+npm run dev
+```
+
+If port 5173 is already taken, stop that process or run the web app on another port and set `CORS_ORIGIN` to match.
+
+More cWBTC: paste the operator funding address into https://faucet-cwbtc.ckb.dev/ (cooldown 24h per address).
