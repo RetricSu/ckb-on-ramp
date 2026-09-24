@@ -4,7 +4,7 @@ import type { Channel, FiberBrowserNode } from '@fiber-pay/sdk/browser';
 import { ApiError, api } from './api';
 import { formatCwbtc, parseCwbtc, toHex } from './amount';
 import { CWBTC_SCRIPT, useFiber } from './FiberProvider';
-import { normalizeChannelStateName } from './channels';
+import { normalizeChannelStateName, waitForCwbtcChannelReady } from './channels';
 import { prepareReceiveRoute } from './peer';
 import { loadReceipts, orderToReceipt, saveReceipt, updateReceiptStatus } from './receipts';
 import type { SwapReceipt, SwapStep } from './types';
@@ -365,6 +365,14 @@ export function useSwap() {
       return;
     }
 
+    if (operatorNode?.operator_channel_funding_amount) {
+      const maxFunded = BigInt(operatorNode.operator_channel_funding_amount);
+      if (parsedTarget.raw > maxFunded) {
+        setError(`Amount exceeds maximum supported inbound channel capacity (${formatCwbtc(maxFunded.toString())} cWBTC). Please enter a smaller amount.`);
+        return;
+      }
+    }
+
     setError(null);
     setIsProgressOpen(true);
 
@@ -394,15 +402,25 @@ export function useSwap() {
         }
       });
 
-      let channelId: string | undefined = readyCwbtcChannels[0]?.channel_id;
+      const matchingChannel = readyCwbtcChannels.find((ch) => {
+        try {
+          return BigInt(ch.remote_balance) >= parsedTarget.raw!;
+        } catch {
+          return false;
+        }
+      });
+      let channelId: string | undefined = matchingChannel?.channel_id;
 
       if (!hasReadyInbound) {
+        // Snapshot existing ready channel IDs so we never mistake a stale, empty ready channel for the new one
+        const existingReadyIds = new Set(readyCwbtcChannels.map((ch) => ch.channel_id));
+
         // Step 3: Peer connection & Scheme B zero-CKB sponsored channel opening
         setStep('connecting_peer');
         setProgressTitle('Connecting to Relay Peer');
         setProgressMessage('Connecting to the Lightning-Fiber gateway…');
 
-        const session = await prepareReceiveRoute({
+        const route = await prepareReceiveRoute({
           nodePubkey,
           defaultFundingLockScript: nodeInfo.default_funding_lock_script,
           connectPeer: (params) => node.connectPeer(params),
@@ -412,59 +430,107 @@ export function useSwap() {
           onOperatorNode: setOperatorNode,
         });
 
-        if (session.channel_id) {
-          channelId = session.channel_id;
+        if (route.channel_id) {
+          channelId = route.channel_id;
         }
 
-        // If provisioning liquidity, poll until channel is confirmed ready
-        if (session.status === 'provisioning_liquidity') {
+        // If waiting for external funding channel, user WASM node initiates openChannelWithExternalFunding
+        if (route.status === 'waiting_for_channel') {
+          setStep('provisioning_channel');
+          setProgressTitle('Opening Sponsored Channel');
+          setProgressMessage('Initiating channel with operator external funding…');
+
+          const opInfo = route.operatorNode;
+          if (!opInfo.funding_lock_script) {
+            throw new Error('Operator node did not advertise a funding_lock_script for external funding.');
+          }
+
+          const ensureHex = (val: string): `0x${string}` => (val.startsWith('0x') ? val : `0x${val}`) as `0x${string}`;
+
+          const openResult = await node.openChannelWithExternalFunding({
+            pubkey: ensureHex(opInfo.node_id),
+            funding_amount: '0x0',
+            funding_udt_type_script: CWBTC_SCRIPT,
+            shutdown_script: nodeInfo.default_funding_lock_script ?? undefined,
+            funding_lock_script: {
+              code_hash: ensureHex(opInfo.funding_lock_script.code_hash),
+              hash_type: opInfo.funding_lock_script.hash_type,
+              args: ensureHex(opInfo.funding_lock_script.args),
+            },
+          });
+
+          channelId = openResult.channel_id;
+
+          setProgressTitle('Signing Channel Transaction');
+          setProgressMessage('Waiting for operator channel acceptance…');
+
+          // Poll server bootstrap session until operator FNN acceptance is confirmed
+          const pollSessionStart = Date.now();
+          const sessionTimeoutMs = 30_000;
+          let acceptedSession = route;
+          while (Date.now() - pollSessionStart < sessionTimeoutMs) {
+            const s = await api.getBootstrapSession(route.session_id).catch(() => null);
+            if (s) {
+              if (s.status === 'failed') {
+                throw new Error(s.message || 'Operator failed to accept channel offer.');
+              }
+              if (s.status === 'provisioning_liquidity' && s.channel_id) {
+                acceptedSession = { ...route, ...s };
+                break;
+              }
+            }
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+
+          if (!acceptedSession.channel_id) {
+            throw new Error('Timed out waiting for operator node to confirm channel acceptance.');
+          }
+
+          setProgressMessage('Requesting operator signature for funding capacity…');
+          const signResult = await api.signFunding({
+            channel_id: acceptedSession.channel_id,
+            unsigned_funding_tx: openResult.unsigned_funding_tx,
+          });
+
+          setProgressTitle('Submitting Funding Transaction');
+          setProgressMessage('Submitting signed funding transaction to network…');
+
+          const submitResult = await node.submitSignedFundingTx({
+            channel_id: openResult.channel_id,
+            signed_funding_tx: signResult.signed_funding_tx as Record<string, unknown>,
+          });
+
+          const finalExpectedChannelId = submitResult?.channel_id ?? openResult.channel_id;
+          channelId = finalExpectedChannelId;
+
+          setProgressTitle('Confirming Inbound Channel');
+          setProgressMessage('Funding transaction submitted. Waiting for on-chain confirmation…');
+
+          channelId = await waitForCwbtcChannelReady({
+            node,
+            sessionId: route.session_id,
+            expectedChannelId: finalExpectedChannelId,
+            existingReadyIds,
+            minInboundCapacity: parsedTarget.raw!,
+            isCwbtcChannel,
+            getBootstrapSession: (sid) => api.getBootstrapSession(sid),
+            timeoutMs: 120_000,
+          });
+        } else if (route.status === 'provisioning_liquidity') {
           setStep('provisioning_channel');
           setProgressTitle('Confirming Inbound Channel');
           setProgressMessage('Network sponsored capacity gifted. Waiting for channel confirmation…');
 
-          const pollStart = Date.now();
-          const timeoutMs = 90_000;
-          let confirmedChannelId: string | null = null;
-
-          while (Date.now() - pollStart < timeoutMs) {
-            // Check session status from server
-            if (session.session_id) {
-              try {
-                const s = await api.getBootstrapSession(session.session_id);
-                if (s.status === 'failed') {
-                  throw new Error(s.message || 'Channel provisioning failed on operator node.');
-                }
-              } catch (sessErr) {
-                if (sessErr instanceof Error && sessErr.message.includes('failed')) {
-                  throw sessErr;
-                }
-              }
-            }
-
-            // Check if local node sees a ready cWBTC channel
-            try {
-              const res = await node.listChannels({});
-              const ready = (res?.channels ?? []).find((ch) => {
-                const isReady = normalizeChannelStateName(ch.state?.state_name) === 'CHANNELREADY';
-                return isReady && isCwbtcChannel(ch);
-              });
-              if (ready) {
-                confirmedChannelId = ready.channel_id;
-                channelId = ready.channel_id;
-                break;
-              }
-            } catch {
-              // ignore transient query error
-            }
-
-            await new Promise((r) => setTimeout(r, 2000));
-          }
-
-          if (!confirmedChannelId) {
-            throw new Error(
-              'Channel opening timed out. The testnet channel did not confirm in time. Please retry.',
-            );
-          }
+          channelId = await waitForCwbtcChannelReady({
+            node,
+            sessionId: route.session_id,
+            expectedChannelId: route.channel_id,
+            existingReadyIds,
+            minInboundCapacity: parsedTarget.raw!,
+            isCwbtcChannel,
+            getBootstrapSession: (sid) => api.getBootstrapSession(sid),
+            timeoutMs: 90_000,
+          });
         }
       }
 

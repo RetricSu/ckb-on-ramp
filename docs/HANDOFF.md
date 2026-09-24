@@ -14,7 +14,25 @@
 
 cWBTC 用 https://faucet-cwbtc.ckb.dev/ 申领。本地 LND / 运营方进程见 [ops/README.md](../ops/README.md)。
 
-**下一步不是再做退出脚本回收 184 CKB**（force close 无视 `shutdown_script`，空通道刷赞助才是真问题），而是改成运营方**外部出资**开渠：用户当 opener 调 `open_channel_with_external_funding`，API 签 funding tx，找零回运营方。详见 [external-funding-lsp.md](./external-funding-lsp.md)。
+**2026-09-23 外部出资建渠基础闭环已调通（Spike 落地）**：
+- 用户作为 Opener 发起 `openChannelWithExternalFunding`（0 UDT，CKB 来自运营方 `funding_lock_script`）。
+- 运营方作为 Acceptor 监听到 `NEGOTIATINGFUNDING` 要约后调用 `accept_channel` 出资 1.0 cWBTC。
+- 用户节点生成 unsigned funding tx，提交至 `POST /api/sign-funding`。
+- 服务端严守 5 道安全闸校验：
+  1. 输入锁白名单校验：只允许归属运营方受信任锁集 `{giftLock, fnnLock}`，且一律回链通过 `client.getCell` 链上自取（不信任客户端伪造数据）；
+  2. 允许双钥架构：既支持同钥部署，也支持 gift 锁与 FNN 节点钱包锁独立拆分的架构，签名者仅对自己负责的 gift 锁签名；
+  3. 输出白名单与 Fiber FundingLock 脚本校验：仅允许恰好 1 个 funding output（lock 为 Fiber FundingLock `0x6c6788...a6d7c`，type 为 `CWBTC_SCRIPT`，capacity 严格 ≤ 250 CKB，UDT 金额精确等于协商出资额）；
+  4. 找零输出与 UDT 守恒定律校验：找零锁必须回退运营方，且满足 `ΣinputsUdt - ΣchangeUdt === fundingUdt`，无任何一聪资产损耗；
+  5. 矿工费与容量预算闸：输入总容量 ≤ 500 CKB，矿工费 ≤ 0.1 CKB。
+- 会话绑定与防重放：强制绑定已 accept 的会话，5 分钟 TTL，签名后立即原子标记 `signed = true`，重复提交直接拒签。
+- 用户节点调用 `submitSignedFundingTx` 广播交易，找零自动回退至运营方锁，彻底消除在用户地址沉淀闲置 CKB Dust 的坏账敞口。
+- *注：本阶段按计划聚焦单一会话基础流程调通，多用户 UTXO 预拆分与并发 hot-cell 锁暂缓至下一阶段。*
+
+已验证：
+
+- `npm test`：91 个测试全部通过（42 api + 48 web + 1 contracts）。
+- `npm run typecheck`：contracts、api、web 静态类型检查全部通过。
+- `npm run build`：生产构建全部通过。
 
 ---
 

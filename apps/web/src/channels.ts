@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { normalizeChannelStateName } from '@ckb-on-ramp/contracts';
 import type {
   AcceptChannelParams,
   AcceptChannelResult,
@@ -8,6 +9,8 @@ import type {
   ListChannelsResult,
 } from '@fiber-pay/sdk/browser';
 
+export { normalizeChannelStateName };
+
 /**
  * Minimal interface required from a Fiber node client to inspect and accept channels.
  * FiberBrowserNode naturally satisfies this interface.
@@ -15,14 +18,6 @@ import type {
 export interface ChannelAcceptorClient {
   listChannels(params?: ListChannelsParams): Promise<ListChannelsResult>;
   acceptChannel(params: AcceptChannelParams): Promise<AcceptChannelResult>;
-}
-
-/**
- * Normalizes a channel state name to uppercase alphanumeric characters
- * to reliably match regardless of casing (e.g. "NegotiatingFunding" vs "NEGOTIATING_FUNDING").
- */
-export function normalizeChannelStateName(stateName?: string): string {
-  return (stateName ?? '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
 }
 
 /**
@@ -205,4 +200,84 @@ export function useChannelAcceptor(
       controller.stop();
     };
   }, [isRunning, node, options?.pollIntervalMs, options?.onAccepted, options?.onError]);
+}
+
+export interface WaitForChannelReadyOptions {
+  node: Pick<ChannelAcceptorClient, 'listChannels'>;
+  sessionId?: string;
+  expectedChannelId?: string;
+  existingReadyIds?: Set<string>;
+  minInboundCapacity?: bigint;
+  isCwbtcChannel: (ch: Channel) => boolean;
+  getBootstrapSession?: (sessionId: string) => Promise<{ status: string; message?: string }>;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}
+
+/**
+ * Polls until the newly opened cWBTC channel reaches CHANNELREADY on the local node.
+ * - Throws immediately if server reports session failure without string-filtering.
+ * - Avoids falsely matching existing stale channels with insufficient inbound capacity.
+ */
+export async function waitForCwbtcChannelReady(
+  options: WaitForChannelReadyOptions,
+): Promise<ChannelId> {
+  const {
+    node,
+    sessionId,
+    expectedChannelId,
+    existingReadyIds,
+    minInboundCapacity,
+    isCwbtcChannel,
+    getBootstrapSession,
+    timeoutMs = 120_000,
+    pollIntervalMs = 2_000,
+  } = options;
+
+  const pollStart = Date.now();
+
+  while (Date.now() - pollStart < timeoutMs) {
+    if (sessionId && getBootstrapSession) {
+      const s = await getBootstrapSession(sessionId).catch(() => null);
+      if (s && s.status === 'failed') {
+        throw new Error(s.message || 'Channel provisioning failed on operator node.');
+      }
+    }
+
+    try {
+      const res = await node.listChannels({});
+      const ready = (res?.channels ?? []).find((ch: Channel) => {
+        if (normalizeChannelStateName(ch.state?.state_name) !== 'CHANNELREADY') return false;
+        if (!isCwbtcChannel(ch)) return false;
+
+        if (expectedChannelId && ch.channel_id.toLowerCase() === expectedChannelId.toLowerCase()) {
+          return true;
+        }
+
+        if (existingReadyIds && existingReadyIds.has(ch.channel_id)) {
+          return false;
+        }
+
+        if (minInboundCapacity !== undefined) {
+          try {
+            return BigInt(ch.remote_balance) >= minInboundCapacity;
+          } catch {
+            return false;
+          }
+        }
+
+        return true;
+      });
+
+      if (ready) {
+        return ready.channel_id;
+      }
+    } catch {
+      // Ignore transient query error
+    }
+
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+
+  throw new Error('Channel opening timed out. The testnet channel did not confirm in time. Please retry.');
 }
