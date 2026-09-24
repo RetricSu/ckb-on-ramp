@@ -6,6 +6,3 @@ apps/web/public/vendor/
 screenshots/
 ops/data/
 ops/runtime.env
-
-# ctx-desktop task metadata (harness state, not project code)
-.ctx/
