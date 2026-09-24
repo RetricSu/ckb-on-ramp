@@ -120,7 +120,15 @@ export class CccOperatorCkbSender implements OperatorCkbSender {
 
       // 3. Sign operator inputs
       const signedTx = await this.signer.signOnlyTransaction(tx);
-      return normalizeCkbTransactionForRpc(signedTx);
+      // CCC Transaction holds BigInt/mol Proxy values that JSON.stringify cannot
+      // serialize directly; round-trip with a bigint->hex replacer to get a plain
+      // JSON value before converting keys back to snake_case RPC shape.
+      const plain = JSON.parse(
+        JSON.stringify(signedTx, (_key, v) =>
+          typeof v === 'bigint' ? `0x${v.toString(16)}` : v,
+        ),
+      );
+      return normalizeCkbTransactionForRpc(plain);
     } catch (err) {
       if (err instanceof FundingPolicyError) {
         throw err;

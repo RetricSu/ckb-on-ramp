@@ -162,7 +162,12 @@ export async function prepareInboundLiquidity(
             const candidates = (listRes?.channels ?? []).filter((ch) => {
               const pk = String(ch.pubkey ?? '').replace(/^0x/, '').toLowerCase();
               const isPending = normalizeChannelStateName(ch.state?.state_name) === 'NEGOTIATINGFUNDING';
-              return ch.is_acceptor && pk === targetPubkey && isPending;
+              const udt = ch.funding_udt_type_script;
+              const isCwbtc =
+                !udt ||
+                (String(udt.code_hash ?? udt.codeHash ?? '').toLowerCase() === CWBTC_SCRIPT.code_hash.toLowerCase() &&
+                  String(udt.args ?? '').toLowerCase() === CWBTC_SCRIPT.args.toLowerCase());
+              return ch.is_acceptor && pk === targetPubkey && isPending && isCwbtc;
             });
 
             for (const pending of candidates) {

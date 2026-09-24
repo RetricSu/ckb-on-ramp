@@ -858,7 +858,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
         /Unauthorized input cell/,
       );
 
-      // Gate (c) failure: total input capacity exceeds 500 CKB budget
+      // Gate (c) failure: total input capacity exceeds 800 CKB budget
       const txWithExcessiveCapacity = {
         inputs: [{ previous_output: { tx_hash: '0x' + '88'.repeat(32), index: '0x0' }, since: '0x0' }],
         outputs: [
@@ -969,6 +969,31 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
       await assert.rejects(
         () => sender.signFundingTransaction!(txWithSpoofedInput, signOpts),
         /exceeds maximum allowed budget/, // caught by real chain capacity 600 CKB > 500 CKB
+      );
+
+      // Gate failure: gift-side CKB not conserved (gift change omitted, gift funds siphoned)
+      const txWithSiphonedGift = {
+        inputs: [
+          { previous_output: { tx_hash: '0x' + '11'.repeat(32), index: '0x0' }, since: '0x0' },
+          { previous_output: { tx_hash: '0x' + '22'.repeat(32), index: '0x0' }, since: '0x0' },
+        ],
+        outputs: [
+          {
+            capacity: '0x' + (184n * 100000000n).toString(16),
+            lock: { code_hash: '0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c', hash_type: 'type', args: '0x1234' },
+            type: CWBTC_SCRIPT,
+          },
+          {
+            capacity: '0x' + (19999900000n).toString(16),
+            lock: fnnLock,
+            type: CWBTC_SCRIPT,
+          },
+        ],
+        outputs_data: ['0x00e1f505000000000000000000000000', '0x0084d717000000000000000000000000'],
+      };
+      await assert.rejects(
+        () => sender.signFundingTransaction!(txWithSiphonedGift, signOpts),
+        /Gift funds not conserved/,
       );
 
       // Success: Authentic dual-funded UDT shape

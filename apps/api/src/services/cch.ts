@@ -61,6 +61,11 @@ export interface FnnChannelItem {
   state?: {
     state_name?: string;
   };
+  funding_udt_type_script?: {
+    code_hash?: string;
+    codeHash?: string;
+    args?: string;
+  } | null;
 }
 export interface CchGateway {
   createOrder(input: CreateOrderRequest, quote: Quote): Promise<SwapOrder>;
@@ -212,9 +217,11 @@ export class RpcCchGateway implements CchGateway {
     if (!nodeId || typeof nodeId !== 'string') {
       throw new Error('FNN node_info did not return a valid node_id or pubkey');
     }
-    const addresses = Array.isArray(raw.addresses)
+    const advertised = Array.isArray(raw.addresses)
       ? raw.addresses.filter((addr): addr is string => typeof addr === 'string')
       : [];
+    const extras = config.operatorP2pAddresses;
+    const addresses = [...advertised, ...extras.filter((addr) => !advertised.includes(addr))];
     const channelCount = parseRpcCount(raw.channel_count);
     const peerCount = parseRpcCount(raw.peer_count ?? raw.peers_count);
     let fundingLockScript: CkbScript | undefined;

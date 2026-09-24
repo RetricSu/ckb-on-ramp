@@ -134,6 +134,7 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
         });
       } catch (err) {
         session.signed = false; // rollback on failure
+        console.error('[sign-funding] failed:', err instanceof Error ? err.message : String(err));
         throw err;
       }
 
