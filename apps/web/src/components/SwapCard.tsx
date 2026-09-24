@@ -7,6 +7,7 @@ import {
   CkbIcon,
   InfoIcon,
   LightningBoltIcon,
+  RefreshIcon,
   SpinnerIcon,
 } from './Icons';
 
@@ -38,6 +39,7 @@ export function SwapCard({ swap }: SwapCardProps) {
   } = swap;
 
   const [detailsExpanded, setDetailsExpanded] = useState(false);
+  const [rateInverted, setRateInverted] = useState(false);
 
   // Sats equivalent
   const paySatsDisplay = quote ? quote.pay_sats : Math.round(Number(payAmount || '0') * 100_000_000);
@@ -71,6 +73,20 @@ export function SwapCard({ swap }: SwapCardProps) {
       ? ((quote.fee_sats / Number(quote.receive_raw)) * 100).toFixed(2)
       : null;
 
+  // Effective exchange rate (after fees) and its delta vs the 1:1 nominal peg.
+  // Displayed like 1inch's rate line so users see the real price, not the headline peg.
+  const paySats = quote ? quote.pay_sats : 0;
+  const receiveSats = quote ? Number(quote.receive_raw) : 0;
+  const effectiveRate = paySats > 0 ? receiveSats / paySats : null;
+  const rateDeltaPercent =
+    effectiveRate !== null ? ((effectiveRate - 1) * 100).toFixed(2) : null;
+  const rateDisplay =
+    effectiveRate !== null
+      ? rateInverted
+        ? `1 cWBTC = ${(1 / effectiveRate).toFixed(8)} BTC`
+        : `1 BTC = ${effectiveRate.toFixed(8)} cWBTC`
+      : null;
+
   return (
     <div className="swap-card-container">
       {hasPendingOrder && (
@@ -91,13 +107,12 @@ export function SwapCard({ swap }: SwapCardProps) {
 
       <div className="swap-card">
         <div className="swap-card-header">
-          <div className="card-title-group">
-            <h2 className="card-title">Swap</h2>
-            <span className="card-subtitle">Instant Cross-Chain Hop</span>
-          </div>
-          <div className="rate-badge" title="Base exchange rate: 1 BTC = 1 cWBTC">
-            <span>1 BTC ≈ 1 cWBTC</span>
-          </div>
+          <h2 className="card-title">Swap</h2>
+          {quote && (
+            <span className="quote-freshness" title="Quote refreshes automatically as you edit the amount">
+              {isQuoting ? 'Updating quote…' : 'Live quote'}
+            </span>
+          )}
         </div>
 
         {/* You Pay Box */}
@@ -205,11 +220,16 @@ export function SwapCard({ swap }: SwapCardProps) {
             </div>
           </div>
 
-          <div className="receive-box-footer">
-            <span className="settlement-hint">
-              ⚡ Instant off-chain settlement to your browser Fiber node
-            </span>
-          </div>
+          {quote && (
+            <div className="receive-box-footer">
+              <span className="box-sublabel">
+                ≈ {receiveSats.toLocaleString()} sats
+                {rateDeltaPercent !== null && Number(rateDeltaPercent) !== 0 && (
+                  <span className="rate-delta"> ({rateDeltaPercent}%)</span>
+                )}
+              </span>
+            </div>
+          )}
 
           {touched && inputMode === 'receive' && parsedTarget.error && (
             <p className="input-error-text">{parsedTarget.error}</p>
@@ -227,9 +247,9 @@ export function SwapCard({ swap }: SwapCardProps) {
             <div className="toggle-left">
               <InfoIcon width="14" height="14" />
               <span>
-                {quote
-                  ? `Fee: ${quote.fee_sats.toLocaleString()} sats (${feeRatePercent ? `~${feeRatePercent}%` : 'Base + proportional'})`
-                  : 'Fee breakdown & routing details'}
+                {quote && rateDisplay
+                  ? `${rateDisplay} · Fee ${quote.fee_sats.toLocaleString()} sats`
+                  : 'Rate, fee & settlement details'}
               </span>
             </div>
             <div className={`toggle-chevron ${detailsExpanded ? 'expanded' : ''}`}>
@@ -240,39 +260,44 @@ export function SwapCard({ swap }: SwapCardProps) {
           {detailsExpanded && (
             <div className="details-content">
               <div className="detail-row">
-                <span className="detail-label">Base Exchange Rate</span>
-                <span className="detail-value">1 BTC = 1.00000000 cWBTC</span>
+                <span className="detail-label">Rate</span>
+                {rateDisplay ? (
+                  <button
+                    type="button"
+                    className="rate-flip-button"
+                    onClick={() => setRateInverted((prev) => !prev)}
+                    title="Invert rate"
+                  >
+                    <span>{rateDisplay}</span>
+                    <RefreshIcon width="12" height="12" />
+                  </button>
+                ) : (
+                  <span className="detail-value">1 BTC = 1.00000000 cWBTC (before fees)</span>
+                )}
               </div>
-              {quote ? (
-                <>
-                  <div className="detail-row highlight-row">
-                    <span className="detail-label">Total Operator Fee</span>
-                    <span className="detail-value">
-                      {quote.fee_sats.toLocaleString()} sats {feeRatePercent && `(${feeRatePercent}%)`}
-                    </span>
-                  </div>
-                  <div className="detail-row">
-                    <span className="detail-label">Total Amount to Pay</span>
-                    <span className="detail-value bold-text">{quote.pay_sats.toLocaleString()} sats</span>
-                  </div>
-                </>
-              ) : (
-                <div className="detail-row">
-                  <span className="detail-label">Network Fee Policy</span>
-                  <span className="detail-value">Base fee + 0.3% CCH routing</span>
+              {quote && (
+                <div className="detail-row highlight-row">
+                  <span className="detail-label">Operator Fee</span>
+                  <span className="detail-value">
+                    {quote.fee_sats.toLocaleString()} sats {feeRatePercent && `(${feeRatePercent}%)`}
+                  </span>
                 </div>
               )}
               <div className="detail-row">
+                <span className="detail-label">Slippage</span>
+                <span className="detail-value">0% — amount fixed by invoice</span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">Route</span>
+                <span className="detail-value">Lightning → CCH → Fiber</span>
+              </div>
+              <div className="detail-row">
                 <span className="detail-label">Estimated Arrival</span>
-                <span className="detail-value green-text">~10 seconds (Instant)</span>
+                <span className="detail-value green-text">~10 seconds</span>
               </div>
               <div className="detail-row">
-                <span className="detail-label">Inbound Channel</span>
-                <span className="detail-value">Scheme B 0-CKB Sponsored</span>
-              </div>
-              <div className="detail-row">
-                <span className="detail-label">Custody Mode</span>
-                <span className="detail-value">Non-Custodial (Local Node)</span>
+                <span className="detail-label">Settlement</span>
+                <span className="detail-value">Non-custodial · local Fiber node</span>
               </div>
             </div>
           )}
@@ -298,8 +323,9 @@ export function SwapCard({ swap }: SwapCardProps) {
         </button>
 
         <p className="swap-card-footnote">
-          No account or KYC required. Your Lightning payment unlocks wrapped BTC directly to your
-          browser&apos;s private Fiber node.
+          {quote && feeRatePercent
+            ? `Includes ${feeRatePercent}% operator fee · Non-custodial · No account required`
+            : 'Non-custodial · No account required'}
         </p>
       </div>
     </div>
