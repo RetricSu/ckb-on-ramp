@@ -1,12 +1,16 @@
 import { Router } from 'express';
-import type { CreateOrderRequest, Quote, QuoteRequest } from '@ckb-on-ramp/contracts';
-import { getBootstrapSession, prepareInboundLiquidity } from '../services/bootstrap.js';
+import type { CreateOrderRequest, Quote, QuoteRequest, SignFundingResponse } from '@ckb-on-ramp/contracts';
+import { getBootstrapSession, getBootstrapSessionByChannelId, prepareInboundLiquidity } from '../services/bootstrap.js';
+import { type OperatorCkbSender } from '../services/ccc.js';
 import { CchRpcError, cchGateway as defaultCchGateway, type CchGateway } from '../services/cch.js';
+import { FundingPolicyError } from '../services/errors.js';
+import { getOperatorSigner } from '../services/operatorSigner.js';
 import { createQuote } from '../services/quote.js';
 
 export interface ApiRouterDependencies {
   cchGateway?: CchGateway;
   prepareInboundLiquidity?: typeof prepareInboundLiquidity;
+  operatorCkbSender?: OperatorCkbSender;
 }
 
 export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
@@ -58,7 +62,8 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
     try {
       const session = await prepLiquidity({
         node_pubkey: String(req.body?.node_pubkey ?? ''),
-        funding_address: String(req.body?.funding_address ?? ''),
+        funding_address: req.body?.funding_address ? String(req.body.funding_address) : undefined,
+        external_funding: req.body?.external_funding === true,
       });
       res.status(session.status === 'failed' ? 501 : 201).json(session);
     } catch (error) {
@@ -69,6 +74,81 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
       const msg = error instanceof Error ? error.message : String(error);
       const isValidationError = msg.includes('node_pubkey') || msg.includes('funding_address');
       res.status(isValidationError ? 400 : 500).json({ error: msg });
+    }
+  });
+
+  router.post('/sign-funding', async (req, res) => {
+    try {
+      const channelId = String(req.body?.channel_id ?? '').trim();
+      const unsignedTx = req.body?.unsigned_funding_tx;
+      if (!channelId) {
+        res.status(400).json({ error: 'channel_id is required' });
+        return;
+      }
+      if (!unsignedTx || typeof unsignedTx !== 'object') {
+        res.status(400).json({ error: 'unsigned_funding_tx is required' });
+        return;
+      }
+
+      // Gate: Verify channel_id is bound to an active accepted bootstrap session
+      const session = getBootstrapSessionByChannelId(channelId);
+      if (!session) {
+        res.status(400).json({ error: `channel_id (${channelId}) is not associated with an accepted bootstrap session` });
+        return;
+      }
+      if (session.status !== 'provisioning_liquidity') {
+        res.status(400).json({ error: `Channel session is not in provisioning state (status: ${session.status})` });
+        return;
+      }
+      if (session.signed) {
+        res.status(400).json({ error: `Funding transaction for channel (${channelId}) has already been signed` });
+        return;
+      }
+      if (session.expires_at && Date.now() > session.expires_at) {
+        res.status(400).json({ error: `Bootstrap session for channel (${channelId}) has expired` });
+        return;
+      }
+      if (!session.funding_amount) {
+        res.status(400).json({ error: `Bootstrap session for channel (${channelId}) is missing negotiated funding amount` });
+        return;
+      }
+
+      const sender = deps.operatorCkbSender ?? getOperatorSigner();
+      if (!sender?.signFundingTransaction) {
+        res.status(501).json({
+          error: 'Operator external funding signer is not configured (OPERATOR_CKB_PRIVATE_KEY is unset)',
+        });
+        return;
+      }
+
+      // Atomic reservation to prevent TOCTOU concurrent double-signing
+      session.signed = true;
+
+      let signedTx: unknown;
+      try {
+        const fnnLock = gateway.getFnnFundingLockScript ? await gateway.getFnnFundingLockScript() : undefined;
+        const allowedAdditional = fnnLock ? [fnnLock] : undefined;
+        signedTx = await sender.signFundingTransaction(unsignedTx, {
+          expectedExactUdtAmount: BigInt(session.funding_amount),
+          allowedAdditionalInputLocks: allowedAdditional,
+        });
+      } catch (err) {
+        session.signed = false; // rollback on failure
+        throw err;
+      }
+
+      const response: SignFundingResponse = {
+        channel_id: channelId,
+        signed_funding_tx: signedTx,
+      };
+      res.json(response);
+    } catch (error) {
+      if (error instanceof FundingPolicyError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      const msg = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: msg });
     }
   });
 

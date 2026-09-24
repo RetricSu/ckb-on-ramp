@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { beforeEach, describe, it } from 'node:test';
 import express from 'express';
 import { ClientPublicTestnet } from '@ckb-ccc/core';
-import { CWBTC_SCRIPT } from '@ckb-on-ramp/contracts';
+import { CWBTC_SCRIPT, type BootstrapRequest } from '@ckb-on-ramp/contracts';
 import apiRouter, { createApiRouter } from '../routes/api.js';
 import {
   clearBootstrapSessionsForTest,
@@ -526,7 +526,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
         openChannel: async () => ({ channel_id: '0x' + 'bb'.repeat(32) }),
       };
 
-      const customPrep = (req: { node_pubkey: string; funding_address: string }) =>
+      const customPrep = (req: BootstrapRequest) =>
         prepareInboundLiquidity(req, {
           operatorPrivateKey: DUMMY_OPERATOR_KEY,
           operatorCkbSender: mockSender,
@@ -594,6 +594,422 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
+    });
+  });
+
+  describe('External funding flow (Operator as Acceptor & Signer)', () => {
+    it('validateBootstrapRequest accepts external_funding=true without funding_address', () => {
+      const res = validateBootstrapRequest({
+        node_pubkey: VALID_PUBKEY,
+        external_funding: true,
+      });
+      assert.equal(res.node_pubkey, VALID_PUBKEY);
+      assert.equal(res.funding_address, undefined);
+      assert.equal(res.external_funding, true);
+    });
+
+    it('prepareInboundLiquidity with external_funding watches and accepts pending channel', async () => {
+      let acceptedChannelId: string | undefined;
+      let acceptedFundingAmount: string | undefined;
+
+      const mockGateway: CchGateway = {
+        createOrder: async () => { throw new Error('not used'); },
+        getOrder: async () => null,
+        health: async () => true,
+        getNodeInfo: async () => ({
+          node_id: VALID_PUBKEY,
+          addresses: ['/ip4/127.0.0.1/tcp/18328/ws'],
+          channel_count: 1,
+          peer_count: 2,
+        }),
+        openChannel: async () => ({ channel_id: 'not_used' }),
+        listChannels: async () => ({
+          channels: [
+            {
+              channel_id: '0x' + 'cc'.repeat(32),
+              pubkey: VALID_PUBKEY,
+              is_acceptor: true,
+              state: { state_name: 'NegotiatingFunding' },
+            },
+          ],
+        }),
+        acceptChannel: async (params) => {
+          acceptedChannelId = params.temporary_channel_id;
+          acceptedFundingAmount = params.funding_amount;
+          return { channel_id: '0x' + 'dd'.repeat(32) };
+        },
+      };
+
+      const session = await prepareInboundLiquidity(
+        {
+          node_pubkey: VALID_PUBKEY,
+          external_funding: true,
+        },
+        {
+          operatorPrivateKey: DUMMY_OPERATOR_KEY,
+          cchGateway: mockGateway,
+        },
+      );
+
+      assert.equal(session.status, 'waiting_for_channel');
+      assert.equal(session.gift_tx_hash, undefined);
+
+      const task = getBootstrapSessionTask(session.session_id);
+      assert.ok(task);
+      await task;
+
+      assert.equal(acceptedChannelId, '0x' + 'cc'.repeat(32));
+      assert.equal(acceptedFundingAmount, '0x5f5e100'); // 1.0 cWBTC
+
+      const updated = getBootstrapSession(session.session_id);
+      assert.ok(updated);
+      assert.equal(updated.status, 'provisioning_liquidity');
+      assert.equal(updated.channel_id, '0x' + 'dd'.repeat(32));
+    });
+
+    it('POST /api/sign-funding enforces real session-gate binding and one-time consumption (replay prevention)', async () => {
+      const DUMMY_ACCEPTED_CHANNEL_ID = '0x' + 'ab'.repeat(32);
+      const mockGateway: CchGateway = {
+        createOrder: async () => { throw new Error('not used'); },
+        getOrder: async () => null,
+        health: async () => true,
+        getNodeInfo: async () => ({
+          node_id: VALID_PUBKEY,
+          addresses: ['/ip4/127.0.0.1/tcp/18328/ws'],
+          channel_count: 1,
+          peer_count: 2,
+        }),
+        openChannel: async () => ({ channel_id: 'not_used' }),
+        listChannels: async () => ({
+          channels: [
+            {
+              channel_id: '0x' + 'cc'.repeat(32),
+              pubkey: VALID_PUBKEY,
+              is_acceptor: true,
+              state: { state_name: 'NegotiatingFunding' },
+            },
+          ],
+        }),
+        acceptChannel: async () => ({ channel_id: DUMMY_ACCEPTED_CHANNEL_ID }),
+      };
+
+      const mockSender: OperatorCkbSender = {
+        sendCapacityGift: async () => ({ txHash: '0x' }),
+        signFundingTransaction: async (tx) => ({ ...(tx as object), witnesses: ['0xsigned'] }),
+      };
+
+      // Create and accept real session
+      const session = await prepareInboundLiquidity(
+        { node_pubkey: VALID_PUBKEY, external_funding: true },
+        { operatorPrivateKey: DUMMY_OPERATOR_KEY, cchGateway: mockGateway },
+      );
+      await getBootstrapSessionTask(session.session_id);
+
+      const app = express();
+      app.use(express.json());
+      // Real session check enabled (skipSessionCheck is false by default)
+      app.use('/api', createApiRouter({ operatorCkbSender: mockSender }));
+
+      const server = createServer(app);
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const port = (server.address() as any).port;
+
+      try {
+        // 1. Missing channel_id
+        const res1 = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ unsigned_funding_tx: {} }),
+        });
+        assert.equal(res1.status, 400);
+
+        // 2. Missing unsigned_funding_tx
+        const res2 = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ channel_id: DUMMY_ACCEPTED_CHANNEL_ID }),
+        });
+        assert.equal(res2.status, 400);
+
+        // 3. Unassociated channel_id is rejected with 400
+        const unassocRes = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: '0x' + '99'.repeat(32),
+            unsigned_funding_tx: { inputs: [], outputs: [] },
+          }),
+        });
+        assert.equal(unassocRes.status, 400);
+        const unassocBody = (await unassocRes.json()) as any;
+        assert.match(unassocBody.error, /not associated with an accepted bootstrap session/);
+
+        // 4. Associated channel_id succeeds on first attempt
+        const validRes = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: DUMMY_ACCEPTED_CHANNEL_ID,
+            unsigned_funding_tx: { inputs: [], outputs: [] },
+          }),
+        });
+        assert.equal(validRes.status, 200);
+        const validBody = (await validRes.json()) as any;
+        assert.equal(validBody.channel_id, DUMMY_ACCEPTED_CHANNEL_ID);
+        assert.deepEqual(validBody.signed_funding_tx.witnesses, ['0xsigned']);
+
+        // 5. Replay with the same channel_id is rejected (session is one-time consumed)
+        const replayRes = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: DUMMY_ACCEPTED_CHANNEL_ID,
+            unsigned_funding_tx: { inputs: [], outputs: [] },
+          }),
+        });
+        assert.equal(replayRes.status, 400);
+        const replayBody = (await replayRes.json()) as any;
+        assert.match(replayBody.error, /already been signed/);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it('signFundingTransaction enforces 3 security gates on real dual-funded UDT shape with UDT conservation', async () => {
+      const DUMMY_KEY = '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+      const tempSender = new CccOperatorCkbSender(DUMMY_KEY);
+      const giftLock = await tempSender.getFundingLockScript!();
+      const fnnLock = {
+        codeHash: '0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8',
+        hashType: 'type' as const,
+        args: '0x' + '22'.repeat(20),
+      };
+
+      // Input 0: Gift lock cell providing 300 CKB capacity
+      const giftCell = {
+        cellOutput: {
+          capacity: '0x' + (300n * 100000000n).toString(16),
+          lock: { codeHash: giftLock.code_hash, hashType: giftLock.hash_type, args: giftLock.args },
+        },
+        outputData: '0x',
+      };
+
+      // Input 1: FNN internal wallet cell providing 200 CKB capacity + 5.0 cWBTC UDT
+      // 5.0 cWBTC = 500,000,000 raw = 0x1dcd6500
+      const udt5cWbtcHex = '0x0065cd1d000000000000000000000000';
+      const fnnUdtCell = {
+        cellOutput: {
+          capacity: '0x' + (200n * 100000000n).toString(16),
+          lock: fnnLock,
+          type: {
+            codeHash: CWBTC_SCRIPT.code_hash,
+            hashType: CWBTC_SCRIPT.hash_type,
+            args: CWBTC_SCRIPT.args,
+          },
+        },
+        outputData: udt5cWbtcHex,
+      };
+
+      const attackerLock = {
+        codeHash: giftLock.code_hash,
+        hashType: giftLock.hash_type,
+        args: '0x' + '99'.repeat(20),
+      };
+
+      const baseClient = new ClientPublicTestnet();
+      const fakeClient = Object.assign(Object.create(baseClient), {
+        getCell: async (outPoint: any) => {
+          if (outPoint.txHash === '0x' + '99'.repeat(32)) {
+            return { cellOutput: { capacity: '0x4a817c800', lock: attackerLock }, outputData: '0x' };
+          }
+          if (outPoint.txHash === '0x' + '88'.repeat(32)) {
+            return {
+              cellOutput: { capacity: '0x8ba43b7400', lock: giftCell.cellOutput.lock },
+              outputData: '0x',
+            };
+          }
+          if (outPoint.txHash === '0x' + '22'.repeat(32)) {
+            return fnnUdtCell;
+          }
+          return giftCell;
+        },
+      });
+
+      const sender = new CccOperatorCkbSender(DUMMY_KEY, fakeClient as any);
+      const signOpts = {
+        allowedAdditionalInputLocks: [fnnLock],
+        expectedExactUdtAmount: 100_000_000n, // 1.0 cWBTC
+      };
+
+      // Gate (a) failure: unknown input cell not belonging to allowed locks
+      const txWithForeignInput = {
+        inputs: [{ previous_output: { tx_hash: '0x' + '99'.repeat(32), index: '0x0' }, since: '0x0' }],
+        outputs: [
+          {
+            capacity: '0x' + (184n * 100000000n).toString(16),
+            lock: { code_hash: '0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c', hash_type: 'type', args: '0x1234' },
+            type: CWBTC_SCRIPT,
+          },
+        ],
+        outputs_data: ['0x00e1f505000000000000000000000000'],
+      };
+      await assert.rejects(
+        () => sender.signFundingTransaction!(txWithForeignInput, signOpts),
+        /Unauthorized input cell/,
+      );
+
+      // Gate (c) failure: total input capacity exceeds 500 CKB budget
+      const txWithExcessiveCapacity = {
+        inputs: [{ previous_output: { tx_hash: '0x' + '88'.repeat(32), index: '0x0' }, since: '0x0' }],
+        outputs: [
+          {
+            capacity: '0x' + (184n * 100000000n).toString(16),
+            lock: { code_hash: '0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c', hash_type: 'type', args: '0x1234' },
+            type: CWBTC_SCRIPT,
+          },
+        ],
+        outputs_data: ['0x00e1f505000000000000000000000000'],
+      };
+      await assert.rejects(
+        () => sender.signFundingTransaction!(txWithExcessiveCapacity, signOpts),
+        /exceeds maximum allowed budget/,
+      );
+
+      // Gate (b) failure: funding output lock is NOT authorized Fiber FundingLock
+      const txWithUnauthorizedFundingLock = {
+        inputs: [{ previous_output: { tx_hash: '0x' + '11'.repeat(32), index: '0x0' }, since: '0x0' }],
+        outputs: [
+          {
+            capacity: '0x' + (184n * 100000000n).toString(16),
+            lock: giftLock,
+            type: CWBTC_SCRIPT,
+          },
+        ],
+        outputs_data: ['0x00e1f505000000000000000000000000'],
+      };
+      await assert.rejects(
+        () => sender.signFundingTransaction!(txWithUnauthorizedFundingLock, signOpts),
+        /authorized Fiber FundingLock/,
+      );
+
+      // Gate (b) failure: change output stolen to attacker address
+      const txWithStolenChange = {
+        inputs: [{ previous_output: { tx_hash: '0x' + '11'.repeat(32), index: '0x0' }, since: '0x0' }],
+        outputs: [
+          {
+            capacity: '0x' + (184n * 100000000n).toString(16),
+            lock: { code_hash: '0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c', hash_type: 'type', args: '0x1234' },
+            type: CWBTC_SCRIPT,
+          },
+          {
+            capacity: '0x' + (11599900000n).toString(16),
+            lock: attackerLock,
+          },
+        ],
+        outputs_data: ['0x00e1f505000000000000000000000000', '0x'],
+      };
+      await assert.rejects(
+        () => sender.signFundingTransaction!(txWithStolenChange, signOpts),
+        /Change output lock script does not return to operator funding lock/,
+      );
+
+      // Gate (b) failure: UDT not conserved (input 5.0 cWBTC, funding 1.0 cWBTC, but change only 3.5 cWBTC => 0.5 stolen)
+      // 3.5 cWBTC = 350,000,000 raw = 0x14dc9380
+      const udt35cWbtcHex = '0x8093dc14000000000000000000000000';
+      const txWithUdtDrained = {
+        inputs: [
+          { previous_output: { tx_hash: '0x' + '11'.repeat(32), index: '0x0' }, since: '0x0' },
+          { previous_output: { tx_hash: '0x' + '22'.repeat(32), index: '0x0' }, since: '0x0' },
+        ],
+        outputs: [
+          {
+            capacity: '0x' + (184n * 100000000n).toString(16),
+            lock: { code_hash: '0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c', hash_type: 'type', args: '0x1234' },
+            type: CWBTC_SCRIPT,
+          },
+          {
+            capacity: '0x' + (11599900000n).toString(16),
+            lock: giftLock,
+          },
+          {
+            capacity: '0x' + (19999900000n).toString(16),
+            lock: fnnLock,
+            type: CWBTC_SCRIPT,
+          },
+        ],
+        outputs_data: ['0x00e1f505000000000000000000000000', '0x', udt35cWbtcHex],
+      };
+      await assert.rejects(
+        () => sender.signFundingTransaction!(txWithUdtDrained, signOpts),
+        /UDT balance is not conserved/,
+      );
+
+      // Gate failure: client attempts to lie with fake cellOutput capacity (on-chain check detects it)
+      const txWithSpoofedInput = {
+        inputs: [
+          {
+            previous_output: { tx_hash: '0x' + '88'.repeat(32), index: '0x0' },
+            since: '0x0',
+            cell_output: { capacity: '0x1000' }, // client claims 1 CKB
+          },
+        ],
+        outputs: [
+          {
+            capacity: '0x1000',
+            lock: {
+              code_hash: '0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c',
+              hash_type: 'type',
+              args: '0x1234',
+            },
+            type: CWBTC_SCRIPT,
+          },
+        ],
+        outputs_data: ['0x00e1f505000000000000000000000000'],
+      };
+      await assert.rejects(
+        () => sender.signFundingTransaction!(txWithSpoofedInput, signOpts),
+        /exceeds maximum allowed budget/, // caught by real chain capacity 600 CKB > 500 CKB
+      );
+
+      // Success: Authentic dual-funded UDT shape
+      // Input 0: Gift lock (300 CKB)
+      // Input 1: FNN wallet lock (200 CKB with 5.0 cWBTC)
+      // Total inputs: 500 CKB, 5.0 cWBTC
+      // Output 0 (Funding): 184 CKB with 1.0 cWBTC (0x00e1f505000000000000000000000000)
+      // Output 1 (CKB change to gift lock): 115.999 CKB
+      // Output 2 (UDT change to FNN lock): 199.999 CKB with 4.0 cWBTC (400,000,000 raw = 0x17d78400)
+      // Total outputs: 499.998 CKB (0.002 CKB miner fee), 5.0 cWBTC (1.0 in funding + 4.0 in change)
+      const udt4cWbtcHex = '0x0084d717000000000000000000000000';
+      const authenticDualFundedTx = {
+        inputs: [
+          { previous_output: { tx_hash: '0x' + '11'.repeat(32), index: '0x0' }, since: '0x0' },
+          { previous_output: { tx_hash: '0x' + '22'.repeat(32), index: '0x0' }, since: '0x0' },
+        ],
+        outputs: [
+          {
+            capacity: '0x' + (184n * 100000000n).toString(16),
+            lock: { code_hash: '0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c', hash_type: 'type', args: '0x1234' },
+            type: CWBTC_SCRIPT,
+          },
+          {
+            capacity: '0x' + (11599900000n).toString(16),
+            lock: giftLock,
+          },
+          {
+            capacity: '0x' + (19999900000n).toString(16),
+            lock: fnnLock,
+            type: CWBTC_SCRIPT,
+          },
+        ],
+        outputs_data: ['0x00e1f505000000000000000000000000', '0x', udt4cWbtcHex],
+        witnesses: ['0x', '0x'],
+      };
+
+      const signed = (await sender.signFundingTransaction!(authenticDualFundedTx, signOpts)) as any;
+      assert.ok(signed);
+      assert.ok(signed.witnesses);
+      assert.ok(signed.witnesses.length > 0);
+      assert.notEqual(signed.witnesses[0], '0x'); // gift lock witness was signed
     });
   });
 });

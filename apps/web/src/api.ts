@@ -1,4 +1,14 @@
-import type { BootstrapRequest, BootstrapSession, CreateOrderRequest, HealthResponse, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
+import type {
+  BootstrapRequest,
+  BootstrapSession,
+  CreateOrderRequest,
+  HealthResponse,
+  NodeInfo,
+  Quote,
+  SignFundingRequest,
+  SignFundingResponse,
+  SwapOrder,
+} from '@ckb-on-ramp/contracts';
 
 const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) || 'http://localhost:3001/api';
 
@@ -33,4 +43,7 @@ export const api = {
     method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(input),
   }),
   getOrder: (paymentHash: string) => request<SwapOrder>(`/orders/${encodeURIComponent(paymentHash)}`),
+  signFunding: (payload: SignFundingRequest) => request<SignFundingResponse>('/sign-funding', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
 };

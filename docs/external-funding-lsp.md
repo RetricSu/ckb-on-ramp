@@ -99,3 +99,17 @@ Fiber 谈死结构后不能改 input，所以**不能**「服务端选好 cell �
 3. 两笔并发开渠失败后，重试能否收敛  
 
 通过后再把 `/api/bootstrap` 换成 sign-funding 流，并改前端准备收款状态机。
+
+## 落地状态（2026-09-23 基础流程已调通）
+
+基础闭环已在代码层打通并完成 91 项全量测试：
+1. `packages/contracts`：提供 `NodeInfo.funding_lock_script`、`NodeInfo.operator_channel_funding_amount`、`SignFundingRequest/Response` 与 CKB 交易驼峰/下划线双向归一化转换（带 round-trip 单元测试）。
+2. `apps/api`：
+   - `/api/node-info` 导出运营方出资锁 `funding_lock_script` 与出资金额；
+   - `/api/bootstrap` 支持 `external_funding: true`，服务端监听 `NEGOTIATINGFUNDING` 要约并调用 `accept_channel` 出资 1.0 cWBTC；
+   - `POST /api/sign-funding` 实施 5 道严密安全闸（输入锁归属受信任锁集且链上真实校验、允许 cWBTC 找零与双钥部署、Fiber FundingLock 全脚本校验、UDT 进出绝对守恒、容量限额 250 CKB 与矿工费限额 0.1 CKB），并以 5 分钟 TTL + 原子置位防重放。
+   - `services/operatorSigner.ts`：提取懒加载单例与 fail-loud 异常传递。
+3. `apps/web`：
+   - `peer.ts` 在检测到运营方出资锁时自动启用外部出资，直接返回包含 `operatorNode` 的就绪状态；
+   - `useSwap.ts` 结合 `waitForCwbtcChannelReady` 统一轮询，排除未入账旧通道，正确消费 `submitResult.channel_id`，增加最大通道容量校验与签名毫秒级窗口容错重试。
+4. 并发演进：按约定，多用户抢占 UTXO 池的预拆分小 Cell、inflight 占用集合等并发管控机制暂缓，留作后续优化；当前实现已兼容 OPERATOR 赠礼私钥与 FNN 节点私钥同钥或独立拆分的部署模式。

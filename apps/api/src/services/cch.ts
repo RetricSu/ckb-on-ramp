@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { CreateOrderRequest, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
+import type { CkbScript, CreateOrderRequest, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
 import { config } from '../config.js';
+import { getOperatorFundingLockScript } from './operatorSigner.js';
 
 interface RpcEnvelope<T> { result?: T; error?: { code: number; message: string }; }
 interface ReceiveBtcResult {
@@ -21,6 +22,11 @@ interface FnnNodeInfoResult {
   pending_channel_count?: string | number;
   peer_count?: string | number;
   peers_count?: string | number;
+  default_funding_lock_script?: {
+    code_hash: string;
+    hash_type: 'type' | 'data' | 'data1' | 'data2';
+    args: string;
+  };
 }
 export interface OpenChannelParams {
   pubkey: string;
@@ -36,12 +42,35 @@ export interface OpenChannelParams {
 export interface OpenChannelResult {
   channel_id: string;
 }
+export interface AcceptChannelParams {
+  temporary_channel_id: string;
+  funding_amount: string;
+  shutdown_script?: {
+    code_hash: string;
+    hash_type: string;
+    args: string;
+  };
+}
+export interface AcceptChannelResult {
+  channel_id: string;
+}
+export interface FnnChannelItem {
+  channel_id: string;
+  pubkey: string;
+  is_acceptor: boolean;
+  state?: {
+    state_name?: string;
+  };
+}
 export interface CchGateway {
   createOrder(input: CreateOrderRequest, quote: Quote): Promise<SwapOrder>;
   getOrder(paymentHash: string): Promise<SwapOrder | null>;
   health(): Promise<boolean>;
   getNodeInfo(): Promise<NodeInfo>;
   openChannel(params: OpenChannelParams): Promise<OpenChannelResult>;
+  acceptChannel?(params: AcceptChannelParams): Promise<AcceptChannelResult>;
+  listChannels?(params?: { only_pending?: boolean; pubkey?: string }): Promise<{ channels: FnnChannelItem[] }>;
+  getFnnFundingLockScript?(): Promise<CkbScript | undefined>;
 }
 const extractLightningInvoice = (value: ReceiveBtcResult['incoming_invoice']): string => {
   if (typeof value === 'string') return value;
@@ -106,10 +135,17 @@ export class MockCchGateway implements CchGateway {
       addresses: ['/dns4/mock-provider.test/tcp/8443/wss'],
       channel_count: 0,
       peer_count: 0,
+      operator_channel_funding_amount: '100000000',
     };
   }
   async openChannel(_params: OpenChannelParams): Promise<OpenChannelResult> {
     return { channel_id: `mock_${randomUUID()}` };
+  }
+  async acceptChannel(_params: AcceptChannelParams): Promise<AcceptChannelResult> {
+    return { channel_id: `mock_accept_${randomUUID()}` };
+  }
+  async listChannels(_params?: { only_pending?: boolean; pubkey?: string }): Promise<{ channels: FnnChannelItem[] }> {
+    return { channels: [] };
   }
 }
 export class RpcCchGateway implements CchGateway {
@@ -117,6 +153,7 @@ export class RpcCchGateway implements CchGateway {
   constructor(
     private readonly fiberRpcUrl: string = config.fnnRpcUrl,
     private readonly cchRpcUrl: string = config.cchRpcUrl,
+    private readonly fundingLockScriptProvider?: () => Promise<CkbScript | undefined>,
   ) {}
   private async call<T>(method: string, params: unknown[], rpcUrl = this.cchRpcUrl, timeoutMs = 10_000): Promise<T> {
     const controller = new AbortController();
@@ -180,12 +217,33 @@ export class RpcCchGateway implements CchGateway {
       : [];
     const channelCount = parseRpcCount(raw.channel_count);
     const peerCount = parseRpcCount(raw.peer_count ?? raw.peers_count);
+    let fundingLockScript: CkbScript | undefined;
+    if (this.fundingLockScriptProvider) {
+      try {
+        fundingLockScript = await this.fundingLockScriptProvider();
+      } catch {
+        // best-effort
+      }
+    }
     return {
       node_id: nodeId,
       addresses,
       channel_count: channelCount,
       peer_count: peerCount,
+      funding_lock_script: fundingLockScript,
+      operator_channel_funding_amount: config.operatorChannelFundingAmount,
     };
+  }
+  async getFnnFundingLockScript(): Promise<CkbScript | undefined> {
+    try {
+      const raw = await this.call<FnnNodeInfoResult>('node_info', [], this.fiberRpcUrl);
+      if (raw.default_funding_lock_script) {
+        return raw.default_funding_lock_script;
+      }
+    } catch {
+      // best-effort
+    }
+    return undefined;
   }
   async openChannel(params: OpenChannelParams): Promise<OpenChannelResult> {
     const raw = await this.call<{ channel_id?: string; temporary_channel_id?: string }>('open_channel', [params], this.fiberRpcUrl, 30_000);
@@ -197,5 +255,25 @@ export class RpcCchGateway implements CchGateway {
       channel_id: channelId,
     };
   }
+  async acceptChannel(params: AcceptChannelParams): Promise<AcceptChannelResult> {
+    const raw = await this.call<{ channel_id?: string; temporary_channel_id?: string }>('accept_channel', [params], this.fiberRpcUrl, 30_000);
+    const channelId = raw.channel_id ?? raw.temporary_channel_id;
+    if (!channelId || typeof channelId !== 'string') {
+      throw new Error('FNN accept_channel did not return a valid channel_id');
+    }
+    return {
+      channel_id: channelId,
+    };
+  }
+  async listChannels(params?: { only_pending?: boolean; pubkey?: string }): Promise<{ channels: FnnChannelItem[] }> {
+    const raw = await this.call<{ channels?: FnnChannelItem[] }>('list_channels', [params ?? {}], this.fiberRpcUrl, 15_000);
+    return {
+      channels: Array.isArray(raw.channels) ? raw.channels : [],
+    };
+  }
 }
-export const cchGateway: CchGateway = new RpcCchGateway();
+export const cchGateway: CchGateway = new RpcCchGateway(
+  config.fnnRpcUrl,
+  config.cchRpcUrl,
+  getOperatorFundingLockScript,
+);

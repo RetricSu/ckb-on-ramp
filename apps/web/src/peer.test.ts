@@ -317,6 +317,43 @@ describe('Peer address picker and route preparation', () => {
         assert.equal(result.status, 'provisioning_liquidity');
         assert.equal(result.channel_id, '0x123');
       });
+
+      it('automatically enables external_funding when operator advertises funding_lock_script and accepts waiting_for_channel', async () => {
+        let receivedReq: BootstrapRequest | null = null;
+        const liveExtNodeInfo: NodeInfo = {
+          node_id: '03dfe0e6cc02a21ca3a971bc2fa05474872dc2acb91cc5defeb1f0566888536957',
+          addresses: ['/ip4/127.0.0.1/tcp/18328/ws'],
+          channel_count: 1,
+          peer_count: 2,
+          funding_lock_script: {
+            code_hash: '0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8',
+            hash_type: 'type',
+            args: '0x1e5377817162f0c368f3671abb94bf87a775d3da',
+          },
+        };
+
+        const session: BootstrapSession = {
+          session_id: 'wait-channel-session',
+          status: 'waiting_for_channel',
+          message: 'Waiting for open_channel_with_external_funding offer.',
+        };
+
+        const result = await prepareReceiveRoute({
+          nodePubkey: '029a8d5b...',
+          defaultFundingLockScript: mockFundingLockScript,
+          connectPeer: async () => {},
+          getNodeInfo: async () => liveExtNodeInfo,
+          bootstrap: async (req) => {
+            receivedReq = req;
+            return session;
+          },
+          mode: 'testnet',
+        });
+
+        assert.equal(result.status, 'waiting_for_channel');
+        assert.ok(receivedReq);
+        assert.equal((receivedReq as BootstrapRequest).external_funding, true);
+      });
     });
 
     describe('with injected fake connectPeer', () => {

@@ -35,6 +35,11 @@ export interface PrepareRouteOptions {
   bootstrap: (request: BootstrapRequest) => Promise<BootstrapSession>;
   mode?: Environment;
   onOperatorNode?: (info: NodeInfo) => void;
+  externalFunding?: boolean;
+}
+
+export interface PrepareRouteResult extends BootstrapSession {
+  operatorNode: NodeInfo;
 }
 
 /**
@@ -45,7 +50,7 @@ export interface PrepareRouteOptions {
  * 4. Dialing connectPeer with fail-closed semantics on empty or failing addresses.
  * 5. Calling backend bootstrap with node_pubkey and funding_address.
  */
-export async function prepareReceiveRoute(options: PrepareRouteOptions): Promise<BootstrapSession> {
+export async function prepareReceiveRoute(options: PrepareRouteOptions): Promise<PrepareRouteResult> {
   if (!options.nodePubkey || !options.connectPeer) {
     throw new Error('Start the browser Fiber node before preparing a receive route.');
   }
@@ -78,12 +83,26 @@ export async function prepareReceiveRoute(options: PrepareRouteOptions): Promise
     throw new Error(`Failed to connect to operator peer (${peerAddress}): ${detail}`);
   }
 
-  const session = await options.bootstrap({
+  const requestPayload: BootstrapRequest = {
     node_pubkey: options.nodePubkey,
     funding_address: fundingAddress,
-  });
-  if (session.status !== 'ready' && session.status !== 'provisioning_liquidity') {
+    ...(options.externalFunding !== undefined
+      ? { external_funding: options.externalFunding }
+      : info.funding_lock_script
+        ? { external_funding: true }
+        : {}),
+  };
+
+  const session = await options.bootstrap(requestPayload);
+  if (
+    session.status !== 'ready' &&
+    session.status !== 'provisioning_liquidity' &&
+    session.status !== 'waiting_for_channel'
+  ) {
     throw new Error(session.message);
   }
-  return session;
+  return {
+    ...session,
+    operatorNode: info,
+  };
 }

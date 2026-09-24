@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { CWBTC_SCRIPT, type BootstrapRequest, type BootstrapSession } from '@ckb-on-ramp/contracts';
+import { CWBTC_SCRIPT, normalizeChannelStateName, type BootstrapRequest, type BootstrapSession } from '@ckb-on-ramp/contracts';
 import { config } from '../config.js';
 import { CccOperatorCkbSender, type OperatorCkbSender } from './ccc.js';
 import { cchGateway, type CchGateway } from './cch.js';
+
+import { redactSecret } from '../utils/redact.js';
+import { getOperatorSigner } from './operatorSigner.js';
 
 const CKB_TESTNET_ADDRESS_REGEX = /^ckt1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38,120}$/i;
 const SECP256K1_PUBKEY_REGEX = /^(0x)?[0-9a-fA-F]{66}$/;
@@ -23,6 +26,16 @@ export function getBootstrapSession(sessionId: string): BootstrapSession | undef
   return sessions.get(sessionId);
 }
 
+export function getBootstrapSessionByChannelId(channelId: string): BootstrapSession | undefined {
+  const target = channelId.trim().toLowerCase();
+  for (const session of sessions.values()) {
+    if (session.channel_id && session.channel_id.toLowerCase() === target) {
+      return session;
+    }
+  }
+  return undefined;
+}
+
 export function getBootstrapSessionTask(sessionId: string): Promise<void> | undefined {
   return sessionTasks.get(sessionId);
 }
@@ -37,11 +50,21 @@ export function validateBootstrapRequest(input: Partial<BootstrapRequest>): Boot
   if (!SECP256K1_PUBKEY_REGEX.test(nodePubkey)) {
     throw new Error('node_pubkey must be a compressed secp256k1 public key (66 hex characters)');
   }
-  const fundingAddress = String(input.funding_address ?? '').trim();
-  if (!CKB_TESTNET_ADDRESS_REGEX.test(fundingAddress)) {
+  const isExternal = Boolean(input.external_funding);
+  const rawFundingAddress = input.funding_address ? String(input.funding_address).trim() : '';
+
+  if (!isExternal && !rawFundingAddress) {
     throw new Error('funding_address must be a valid CKB testnet address (starting with ckt1)');
   }
-  return { node_pubkey: nodePubkey, funding_address: fundingAddress };
+  if (rawFundingAddress && !CKB_TESTNET_ADDRESS_REGEX.test(rawFundingAddress)) {
+    throw new Error('funding_address must be a valid CKB testnet address (starting with ckt1)');
+  }
+
+  return {
+    node_pubkey: nodePubkey,
+    funding_address: rawFundingAddress || undefined,
+    external_funding: isExternal ? true : undefined,
+  };
 }
 
 export interface BootstrapDependencies {
@@ -71,13 +94,9 @@ export async function prepareInboundLiquidity(
 
   try {
     const gateway = dependencies?.cchGateway ?? cchGateway;
-    const sender = skipCapacityGift
-      ? undefined
-      : dependencies?.operatorCkbSender ??
-        new CccOperatorCkbSender(operatorPrivateKey!, dependencies?.ckbRpcUrl ?? config.ckbRpcUrl);
-
-    // 1. Submit ≥200 CKB capacity gift unless local e2e skips it (offckb accounts are pre-funded).
-    const giftResult = sender ? await sender.sendCapacityGift(validated.funding_address, 200) : undefined;
+    const rawFundingAmount = dependencies?.channelFundingAmount ?? config.operatorChannelFundingAmount;
+    const fundingAmountHex = '0x' + BigInt(rawFundingAmount).toString(16);
+    const pubkey = validated.node_pubkey.replace(/^0x/, '');
 
     // 2. Fetch peer address best-effort
     let peerAddress: string | undefined;
@@ -88,6 +107,102 @@ export async function prepareInboundLiquidity(
       void error;
       // Best-effort; do not fail if getNodeInfo fails
     }
+
+    if (validated.external_funding) {
+      // External funding mode: Operator acts as acceptor (出 1.0 cWBTC)
+      // and waits for the incoming channel opening offer from the user node.
+      const sessionId = randomUUID();
+      const session: BootstrapSession = {
+        session_id: sessionId,
+        status: 'waiting_for_channel',
+        peer_address: peerAddress,
+        message: 'Operator ready to accept inbound channel. Waiting for open_channel_with_external_funding offer.',
+        node_pubkey: pubkey,
+        funding_amount: rawFundingAmount,
+        expires_at: Date.now() + 5 * 60 * 1000,
+        signed: false,
+      };
+
+      trimOldest(sessions);
+      sessions.set(sessionId, session);
+
+      const targetPubkey = pubkey.toLowerCase();
+      const task = (async () => {
+        try {
+          const start = Date.now();
+          const timeoutMs = 60_000;
+          let accepted = false;
+
+          if (!gateway.listChannels || !gateway.acceptChannel) {
+            throw new Error('Gateway does not support channel acceptance');
+          }
+
+          while (Date.now() - start < timeoutMs) {
+            const listRes = await gateway.listChannels({ only_pending: true, pubkey: targetPubkey });
+            const candidates = (listRes?.channels ?? []).filter((ch) => {
+              const pk = ch.pubkey.replace(/^0x/, '').toLowerCase();
+              const isPending = normalizeChannelStateName(ch.state?.state_name) === 'NEGOTIATINGFUNDING';
+              return ch.is_acceptor && pk === targetPubkey && isPending;
+            });
+
+            for (const pending of candidates) {
+              try {
+                const acceptRes = await gateway.acceptChannel({
+                  temporary_channel_id: pending.channel_id,
+                  funding_amount: fundingAmountHex,
+                });
+                const existing = sessions.get(sessionId);
+                if (existing) {
+                  existing.channel_id = acceptRes.channel_id;
+                  existing.status = 'provisioning_liquidity';
+                  existing.message = `Inbound channel offer accepted (${acceptRes.channel_id}). External funding collaboration in progress.`;
+                }
+                accepted = true;
+                break;
+              } catch {
+                // Transient accept failure; retry on subsequent cycle
+              }
+            }
+
+            if (accepted) {
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+
+          if (!accepted) {
+            const existing = sessions.get(sessionId);
+            if (existing && existing.status === 'waiting_for_channel') {
+              existing.status = 'failed';
+              existing.message = 'Timed out waiting for open_channel_with_external_funding offer from user node.';
+            }
+          }
+        } catch (err) {
+          const rawMsg = err instanceof Error ? err.message : String(err);
+          const sanitizedMsg = redactSecret(rawMsg, operatorPrivateKey, '[REDACTED]');
+          const existing = sessions.get(sessionId);
+          if (existing) {
+            existing.status = 'failed';
+            existing.message = `Channel acceptance failed: ${sanitizedMsg}`;
+          }
+        }
+      })();
+
+      trimOldest(sessionTasks);
+      sessionTasks.set(sessionId, task);
+
+      return { ...session };
+    }
+
+    const sender = skipCapacityGift
+      ? undefined
+      : dependencies?.operatorCkbSender ??
+        (dependencies?.operatorPrivateKey
+          ? new CccOperatorCkbSender(dependencies.operatorPrivateKey, dependencies?.ckbRpcUrl ?? config.ckbRpcUrl)
+          : getOperatorSigner());
+
+    // 1. Submit ≥200 CKB capacity gift unless local e2e skips it (offckb accounts are pre-funded).
+    const giftResult = sender ? await sender.sendCapacityGift(validated.funding_address!, 200) : undefined;
 
     // 3. Create in-memory session with gift tx hash and provisioning_liquidity status
     const sessionId = randomUUID();
@@ -105,10 +220,6 @@ export async function prepareInboundLiquidity(
     sessions.set(sessionId, session);
 
     // 4. Background task: waitTransaction → FNN open_channel → update session (channel_id)
-    const rawFundingAmount = dependencies?.channelFundingAmount ?? config.operatorChannelFundingAmount;
-    const fundingAmountHex = '0x' + BigInt(rawFundingAmount).toString(16);
-    const pubkey = validated.node_pubkey.replace(/^0x/, '');
-
     const task = (async () => {
       try {
         if (sender?.waitForTransaction && giftResult?.txHash) {
@@ -131,11 +242,7 @@ export async function prepareInboundLiquidity(
         }
       } catch (err) {
         const rawMsg = err instanceof Error ? err.message : String(err);
-        const sanitizedMsg = operatorPrivateKey
-          ? rawMsg
-              .replaceAll(operatorPrivateKey, '[REDACTED]')
-              .replaceAll(operatorPrivateKey.replace(/^0x/, ''), '[REDACTED]')
-          : rawMsg;
+        const sanitizedMsg = redactSecret(rawMsg, operatorPrivateKey, '[REDACTED]');
         const existing = sessions.get(sessionId);
         if (existing) {
           existing.status = 'failed';
@@ -150,11 +257,7 @@ export async function prepareInboundLiquidity(
     return { ...session };
   } catch (err) {
     const rawMsg = err instanceof Error ? err.message : String(err);
-    const sanitizedMsg = operatorPrivateKey
-      ? rawMsg
-          .replaceAll(operatorPrivateKey, '[REDACTED]')
-          .replaceAll(operatorPrivateKey.replace(/^0x/, ''), '[REDACTED]')
-      : rawMsg;
+    const sanitizedMsg = redactSecret(rawMsg, operatorPrivateKey, '[REDACTED]');
     throw new Error(sanitizedMsg);
   }
 }
