@@ -20,4 +20,8 @@ export const config = {
   operatorCkbPrivateKey: process.env.OPERATOR_CKB_PRIVATE_KEY?.trim() || undefined,
   operatorChannelFundingAmount: process.env.OPERATOR_CHANNEL_FUNDING_AMOUNT?.trim() || '100000000',
   skipCapacityGift: process.env.SKIP_CAPACITY_GIFT === '1',
+  operatorP2pAddresses: (process.env.OPERATOR_P2P_ADDRESSES ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean),
 } as const;

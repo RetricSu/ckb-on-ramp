@@ -42,6 +42,29 @@ export interface PrepareRouteResult extends BootstrapSession {
   operatorNode: NodeInfo;
 }
 
+const normalizePubkey = (value: string): string => value.replace(/^0x/i, '').toLowerCase();
+
+export async function waitForConnectedPeer(
+  listPeers: () => Promise<{ peers?: Array<{ pubkey?: string }> | null } | null | undefined>,
+  pubkey: string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const target = normalizePubkey(pubkey);
+  if (!target) {
+    throw new Error('Operator node pubkey is missing; cannot wait for peer connection.');
+  }
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const result = await listPeers();
+    const peers = result?.peers ?? [];
+    if (peers.some((peer) => normalizePubkey(String(peer.pubkey ?? '')) === target)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  throw new Error(`Timed out waiting to connect to operator peer ${pubkey}`);
+}
+
 /**
  * Prepares the receive route by:
  * 1. Verifying the browser Fiber node is running.

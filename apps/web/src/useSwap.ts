@@ -5,7 +5,7 @@ import { ApiError, api } from './api';
 import { formatCwbtc, parseCwbtc, toHex } from './amount';
 import { CWBTC_SCRIPT, useFiber } from './FiberProvider';
 import { normalizeChannelStateName, waitForCwbtcChannelReady } from './channels';
-import { prepareReceiveRoute } from './peer';
+import { prepareReceiveRoute, waitForConnectedPeer } from './peer';
 import { loadReceipts, orderToReceipt, saveReceipt, updateReceiptStatus } from './receipts';
 import type { SwapReceipt, SwapStep } from './types';
 
@@ -278,24 +278,27 @@ export function useSwap() {
     }
 
     setProgressTitle('Authorizing Local Wallet');
-    setProgressMessage('Authorizing browser Fiber node via Passkey. Your keys stay in this browser.');
-
-    // Check passkey support before attempting
-    if (!fiberRef.current.isPasskeySupported && !fiberRef.current.hasPasskeyConfigured) {
-      const reason =
-        fiberRef.current.passkeyUnavailableReason ||
-        'Passkeys / WebAuthn are not supported in this browser. Please use a modern browser with WebAuthn.';
-      throw new Error(reason);
-    }
-
-    if (fiberRef.current.hasPasskeyConfigured) {
-      await fiberRef.current.startWithPasskey();
+    const e2ePassword = import.meta.env.DEV ? String(import.meta.env.VITE_E2E_PASSWORD ?? '').trim() : '';
+    if (e2ePassword) {
+      setProgressMessage('Authorizing browser Fiber node via local password (dev e2e). Your keys stay in this browser.');
+      await fiberRef.current.startWithPassword(e2ePassword);
     } else {
-      await fiberRef.current.createPasskeyAndStart('CKB On-ramp user');
+      setProgressMessage('Authorizing browser Fiber node via Passkey. Your keys stay in this browser.');
+      if (!fiberRef.current.isPasskeySupported && !fiberRef.current.hasPasskeyConfigured) {
+        const reason =
+          fiberRef.current.passkeyUnavailableReason ||
+          'Passkeys / WebAuthn are not supported in this browser. Please use a modern browser with WebAuthn.';
+        throw new Error(reason);
+      }
+      if (fiberRef.current.hasPasskeyConfigured) {
+        await fiberRef.current.startWithPasskey();
+      } else {
+        await fiberRef.current.createPasskeyAndStart('CKB On-ramp user');
+      }
     }
 
     // Poll fiberRef.current with immediate error checking
-    const maxWait = 20_000;
+    const maxWait = e2ePassword ? 120_000 : 20_000;
     const start = Date.now();
     while (Date.now() - start < maxWait) {
       const current = fiberRef.current;
@@ -445,11 +448,14 @@ export function useSwap() {
             throw new Error('Operator node did not advertise a funding_lock_script for external funding.');
           }
 
+          setProgressMessage('Waiting for operator peer handshake…');
+          await waitForConnectedPeer(() => node.listPeers(), opInfo.node_id);
+
           const ensureHex = (val: string): `0x${string}` => (val.startsWith('0x') ? val : `0x${val}`) as `0x${string}`;
 
-          const openResult = await node.openChannelWithExternalFunding({
+          const openParams = {
             pubkey: ensureHex(opInfo.node_id),
-            funding_amount: '0x0',
+            funding_amount: '0x0' as const,
             funding_udt_type_script: CWBTC_SCRIPT,
             shutdown_script: nodeInfo.default_funding_lock_script ?? undefined,
             funding_lock_script: {
@@ -457,7 +463,29 @@ export function useSwap() {
               hash_type: opInfo.funding_lock_script.hash_type,
               args: ensureHex(opInfo.funding_lock_script.args),
             },
-          });
+            // v0.9.0 sizes the funding fee against a single placeholder witness, but the
+            // final tx carries two witness groups (gift lock + FNN lock) and lands ~85
+            // shannons under the 1000/KW min fee. 2000/KW leaves headroom.
+            funding_fee_rate: '0x7d0' as `0x${string}`,
+            public: false,
+          };
+          let openResult: Awaited<ReturnType<typeof node.openChannelWithExternalFunding>> | undefined;
+          let lastOpenError: string | undefined;
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            try {
+              openResult = await node.openChannelWithExternalFunding(openParams);
+              break;
+            } catch (openErr) {
+              lastOpenError = openErr instanceof Error ? openErr.message : String(openErr);
+              if (!lastOpenError.toLowerCase().includes('not connected') || attempt === 4) {
+                throw openErr;
+              }
+              await waitForConnectedPeer(() => node.listPeers(), opInfo.node_id, 8_000);
+            }
+          }
+          if (!openResult) {
+            throw new Error(lastOpenError || 'Failed to open channel with operator external funding.');
+          }
 
           channelId = openResult.channel_id;
 

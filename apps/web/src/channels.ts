@@ -230,7 +230,7 @@ export async function waitForCwbtcChannelReady(
     minInboundCapacity,
     isCwbtcChannel,
     getBootstrapSession,
-    timeoutMs = 120_000,
+    timeoutMs = 600_000,
     pollIntervalMs = 2_000,
   } = options;
 

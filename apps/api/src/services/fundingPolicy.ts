@@ -1,8 +1,12 @@
 import { CWBTC_SCRIPT } from '@ckb-on-ramp/contracts';
 import { FundingPolicyError } from './errors.js';
 
-export const MAX_FUNDING_CELL_CAPACITY_SHANNONS = 25_000_000_000n; // 250 CKB (dual-funded UDT reservation is ~184-200 CKB)
-export const MAX_TOTAL_INPUT_CAPACITY_SHANNONS = 50_000_000_000n; // 500 CKB
+// Dual-funded UDT channel: both sides reserve ~184 CKB into one funding cell (~368 CKB).
+export const MAX_FUNDING_CELL_CAPACITY_SHANNONS = 40_000_000_000n; // 400 CKB
+// Budget for inputs the API actually signs (operator gift lock). Peer-side inputs are
+// self-funded and self-signed by the peer's own node, so they are NOT capped here; the
+// gift-side conservation check below is what protects API-signed funds.
+export const MAX_TOTAL_INPUT_CAPACITY_SHANNONS = 80_000_000_000n; // 800 CKB
 export const MAX_ALLOWED_FEE_SHANNONS = 10_000_000n; // 0.1 CKB
 export const DEFAULT_ALLOWED_FUNDING_LOCK_CODE_HASHES = [
   '0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c', // Fiber FundingLock
@@ -46,13 +50,15 @@ export interface ValidatedFundingTxResult {
 /**
  * Pure policy validation for external funding transactions.
  * Enforces:
- * 1. Input lock verification (must belong to authorized operator locks)
- * 2. Total input capacity limit (<= 500 CKB)
- * 3. Exactly one funding output with authorized Fiber FundingLock code_hash + hash_type: 'type'
- * 4. Funding output capacity limit (<= 250 CKB)
- * 5. Funding output UDT script matching CWBTC_SCRIPT and matching exact negotiated funding amount
- * 6. Change output whitelist: returns to operator lock, cWBTC type only for UDT change, plain CKB empty data
- * 7. Strict UDT conservation: inputs - change === funding
+ * 1. Input lock verification (operator gift lock or whitelisted peer locks; the 800 CKB
+ *    budget caps only API-signed gift inputs — peer inputs are self-funded)
+ * 2. Exactly one funding output with authorized Fiber FundingLock code_hash + hash_type: 'type'
+ * 3. Funding output capacity limit (<= 400 CKB)
+ * 4. Funding output UDT script matching CWBTC_SCRIPT and matching exact negotiated funding amount
+ * 5. Change outputs: gift change returns to operator lock; peer change must reuse a lock
+ *    present in peer inputs; cWBTC type only for UDT change; plain CKB change has empty data
+ * 6. Strict UDT conservation: inputs - change === funding
+ * 7. Gift-side CKB conservation: gift inputs - gift change <= funding capacity + fee budget
  * 8. Miner fee upper limit: <= 0.1 CKB
  */
 export function assertFundingTxPolicy(
@@ -90,9 +96,18 @@ export function assertFundingTxPolicy(
     });
   };
 
-  // Gate (a) & (c): Validate inputs and capacity
+  // Gate (a): every input must be an authorized lock (operator gift lock or whitelisted peer lock).
+  // Peer inputs are self-funded/self-signed; only gift-lock inputs consume the API budget.
+  let signedInputCapacity = 0n;
   let totalInputCapacity = 0n;
   let totalInputUdt = 0n;
+  const peerInputLocks = new Set<string>();
+  const lockKey = (lock: { codeHash: string; hashType: string; args: string }) =>
+    `${lock.codeHash}|${lock.hashType}|${lock.args}`;
+  const isOperatorLock = (lock: { codeHash: string; hashType: string; args: string }) =>
+    lock.codeHash === operatorLock.codeHash &&
+    lock.hashType === operatorLock.hashType &&
+    lock.args === operatorLock.args;
   for (const input of tx.inputs) {
     if (!input.cellOutput) {
       throw new FundingPolicyError('Input cell output is missing or unverified');
@@ -102,7 +117,13 @@ export function assertFundingTxPolicy(
       throw new FundingPolicyError('Unauthorized input cell: input lock does not match operator funding lock');
     }
 
-    totalInputCapacity += BigInt(input.cellOutput.capacity);
+    const capacity = BigInt(input.cellOutput.capacity);
+    totalInputCapacity += capacity;
+    if (isOperatorLock(input.cellOutput.lock)) {
+      signedInputCapacity += capacity;
+    } else {
+      peerInputLocks.add(lockKey(input.cellOutput.lock));
+    }
 
     // Track UDT input if present
     if (
@@ -118,9 +139,9 @@ export function assertFundingTxPolicy(
     }
   }
 
-  if (totalInputCapacity > MAX_TOTAL_INPUT_CAPACITY_SHANNONS) {
+  if (signedInputCapacity > MAX_TOTAL_INPUT_CAPACITY_SHANNONS) {
     throw new FundingPolicyError(
-      `Total input capacity (${totalInputCapacity}) exceeds maximum allowed budget (${MAX_TOTAL_INPUT_CAPACITY_SHANNONS})`,
+      `Total input capacity (${signedInputCapacity}) exceeds maximum allowed budget (${MAX_TOTAL_INPUT_CAPACITY_SHANNONS})`,
     );
   }
 
@@ -165,14 +186,21 @@ export function assertFundingTxPolicy(
     );
   }
 
-  // Verify all change outputs return to authorized operator lock
+  // Verify change outputs: gift change returns to the operator lock; peer change must
+  // return to a lock that actually appears among peer inputs (cannot be a fresh address
+  // that only receives value). UDT change must be cWBTC with valid 16-byte data; plain
+  // CKB change must have empty data.
   let totalOutputCapacity = 0n;
   let totalChangeUdt = 0n;
+  let giftChangeCapacity = 0n;
   for (const [idx, output] of tx.outputs.entries()) {
     totalOutputCapacity += BigInt(output.capacity);
     if (output === fundingOutput) continue;
 
     if (!isAuthorizedLock(output.lock)) {
+      throw new FundingPolicyError('Change output lock script does not return to operator funding lock');
+    }
+    if (!isOperatorLock(output.lock) && !peerInputLocks.has(lockKey(output.lock))) {
       throw new FundingPolicyError('Change output lock script does not return to operator funding lock');
     }
 
@@ -195,6 +223,21 @@ export function assertFundingTxPolicy(
         throw new FundingPolicyError('Plain CKB change output must have empty cell data');
       }
     }
+
+    if (isOperatorLock(output.lock)) {
+      giftChangeCapacity += BigInt(output.capacity);
+    }
+  }
+
+  // Gift-side CKB conservation: API-signed funds may only flow into the funding cell,
+  // back to the operator lock as change, or into the miner fee budget. Anything beyond
+  // that means gift money is being siphoned to peer/attacker outputs.
+  const giftSpent = signedInputCapacity - giftChangeCapacity;
+  const fundingCapacity = BigInt(fundingOutput.capacity);
+  if (giftSpent > fundingCapacity + MAX_ALLOWED_FEE_SHANNONS) {
+    throw new FundingPolicyError(
+      `Gift funds not conserved: signed inputs (${signedInputCapacity}) - gift change (${giftChangeCapacity}) = ${giftSpent} exceeds funding capacity (${fundingCapacity}) plus fee budget (${MAX_ALLOWED_FEE_SHANNONS})`,
+    );
   }
 
   // UDT conservation check
