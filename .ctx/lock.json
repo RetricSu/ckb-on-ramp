@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "claims": {
+    "fiber.v090-external-funding-quirks": {
+      "policy": "advisory",
+      "claim_hash": "sha256:8cd829a94b5345f8e618c5a14a32700d411a1902300e637761ea06bb24406eff",
+      "semantic_hash": "sha256:907f643838d48f8775b2097f7a5e3f2a386041380f257c4b68aa197b666abea2",
+      "anchors": {
+        "file:apps/api/src/services/fundingPolicy.ts": "sha256:5e2e87c8f392a4f66d4f249194e37731caba686e43cc73d2035fe77c696a08b4",
+        "file:apps/web/src/channels.ts": "sha256:513ccb71ffdf356202cd59ca85606a6b04575af15e4c385151b4733e652cd4b3",
+        "file:apps/web/src/useSwap.ts": "sha256:520caa71c6f67b117b4c272d1334b6a05a5034d15ca11c32a37017686c957509"
+      },
+      "dependencies": {}
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "fiber.v090-external-funding-quirks",
+  "type": "constraint",
+  "lifecycle": "active",
+  "policy": "advisory",
+  "claim": "Fiber v0.9.0 external-funding collaboration has two upstream quirks this repo works around: (1) build_base_from_funding_cell inserts the funder's UDT change output at index 1 (before preserved peer outputs), so the acceptor's UDT input cell must exactly equal the channel amount or VerifyFundingTx fails with InvalidPeerFundingTx; (2) the funding fee is sized against a single 85-byte placeholder witness while the final tx carries two witness groups, so funding_fee_rate must be raised (we use 2000/KW) or the broadcast is rejected as LowFeeRate.",
+  "why": "These constraints explain the exact-amount operator UDT cells (ops/data/prep-operator-cells.mjs), the funding_fee_rate=0x7d0 in useSwap.ts open params, and why a failed run locks operator cells in the live-cells exclusion map until the funding tx commits or fnn restarts.",
+  "anchors": [
+    {
+      "kind": "file",
+      "path": "apps/web/src/useSwap.ts",
+      "watch": "file"
+    },
+    {
+      "kind": "file",
+      "path": "apps/api/src/services/fundingPolicy.ts",
+      "watch": "file"
+    },
+    {
+      "kind": "file",
+      "path": "apps/web/src/channels.ts",
+      "watch": "file"
+    }
+  ],
+  "tags": [
+    "fiber",
+    "external-funding",
+    "e2e",
+    "upstream-bug"
+  ]
+}
