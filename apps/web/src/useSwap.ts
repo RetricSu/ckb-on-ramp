@@ -462,26 +462,35 @@ export function useSwap() {
           channelId = openResult.channel_id;
 
           setProgressTitle('Signing Channel Transaction');
-          setProgressMessage('Requesting operator signature for funding capacity…');
+          setProgressMessage('Waiting for operator channel acceptance…');
 
-          let signResult;
-          try {
-            signResult = await api.signFunding({
-              channel_id: openResult.channel_id,
-              unsigned_funding_tx: openResult.unsigned_funding_tx,
-            });
-          } catch (signErr) {
-            // Allow sub-second window between FNN accept and API session state update
-            if (signErr instanceof ApiError && signErr.message.includes('not associated with an accepted bootstrap session')) {
-              await new Promise((r) => setTimeout(r, 1500));
-              signResult = await api.signFunding({
-                channel_id: openResult.channel_id,
-                unsigned_funding_tx: openResult.unsigned_funding_tx,
-              });
-            } else {
-              throw signErr;
+          // Poll server bootstrap session until operator FNN acceptance is confirmed
+          const pollSessionStart = Date.now();
+          const sessionTimeoutMs = 30_000;
+          let acceptedSession = route;
+          while (Date.now() - pollSessionStart < sessionTimeoutMs) {
+            const s = await api.getBootstrapSession(route.session_id).catch(() => null);
+            if (s) {
+              if (s.status === 'failed') {
+                throw new Error(s.message || 'Operator failed to accept channel offer.');
+              }
+              if (s.status === 'provisioning_liquidity' && s.channel_id) {
+                acceptedSession = { ...route, ...s };
+                break;
+              }
             }
+            await new Promise((r) => setTimeout(r, 1000));
           }
+
+          if (!acceptedSession.channel_id) {
+            throw new Error('Timed out waiting for operator node to confirm channel acceptance.');
+          }
+
+          setProgressMessage('Requesting operator signature for funding capacity…');
+          const signResult = await api.signFunding({
+            channel_id: acceptedSession.channel_id,
+            unsigned_funding_tx: openResult.unsigned_funding_tx,
+          });
 
           setProgressTitle('Submitting Funding Transaction');
           setProgressMessage('Submitting signed funding transaction to network…');

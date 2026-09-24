@@ -13,6 +13,7 @@ const SECP256K1_PUBKEY_REGEX = /^(0x)?[0-9a-fA-F]{66}$/;
 const MAX_BOOTSTRAP_SESSIONS = 1_000;
 const sessions = new Map<string, BootstrapSession>();
 const sessionTasks = new Map<string, Promise<void>>();
+const channelIdToSessionId = new Map<string, string>();
 
 const trimOldest = <K, V>(map: Map<K, V>) => {
   while (map.size >= MAX_BOOTSTRAP_SESSIONS) {
@@ -28,8 +29,15 @@ export function getBootstrapSession(sessionId: string): BootstrapSession | undef
 
 export function getBootstrapSessionByChannelId(channelId: string): BootstrapSession | undefined {
   const target = channelId.trim().toLowerCase();
+  const sessionId = channelIdToSessionId.get(target);
+  if (sessionId) {
+    const s = sessions.get(sessionId);
+    if (s) return s;
+    channelIdToSessionId.delete(target);
+  }
   for (const session of sessions.values()) {
     if (session.channel_id && session.channel_id.toLowerCase() === target) {
+      channelIdToSessionId.set(target, session.session_id);
       return session;
     }
   }
@@ -43,6 +51,7 @@ export function getBootstrapSessionTask(sessionId: string): Promise<void> | unde
 export function clearBootstrapSessionsForTest(): void {
   sessions.clear();
   sessionTasks.clear();
+  channelIdToSessionId.clear();
 }
 
 export function validateBootstrapRequest(input: Partial<BootstrapRequest>): BootstrapRequest {
@@ -85,10 +94,13 @@ export async function prepareInboundLiquidity(
   const operatorPrivateKey = dependencies?.operatorPrivateKey ?? config.operatorCkbPrivateKey;
   const skipCapacityGift = dependencies?.skipCapacityGift ?? config.skipCapacityGift;
   if (!operatorPrivateKey && !skipCapacityGift) {
+    const message = validated.external_funding
+      ? 'Operator external funding is not configured: OPERATOR_CKB_PRIVATE_KEY is unset.'
+      : 'Scheme B inbound-liquidity provisioning (unpaid CKB capacity gift) is not wired: OPERATOR_CKB_PRIVATE_KEY is not configured and channel funding is not implemented.';
     return {
       session_id: randomUUID(),
       status: 'failed',
-      message: 'Scheme B inbound-liquidity provisioning (unpaid CKB capacity gift) is not wired: OPERATOR_CKB_PRIVATE_KEY is not configured and channel funding is not implemented.',
+      message,
     };
   }
 
@@ -137,10 +149,18 @@ export async function prepareInboundLiquidity(
             throw new Error('Gateway does not support channel acceptance');
           }
 
+          let lastAcceptError: string | undefined;
+
           while (Date.now() - start < timeoutMs) {
-            const listRes = await gateway.listChannels({ only_pending: true, pubkey: targetPubkey });
+            let listRes: { channels?: any[] } | undefined;
+            try {
+              listRes = await gateway.listChannels({ only_pending: true, pubkey: targetPubkey });
+            } catch (listErr) {
+              console.warn('[Bootstrap Watcher] listChannels transient error:', listErr);
+            }
+
             const candidates = (listRes?.channels ?? []).filter((ch) => {
-              const pk = ch.pubkey.replace(/^0x/, '').toLowerCase();
+              const pk = String(ch.pubkey ?? '').replace(/^0x/, '').toLowerCase();
               const isPending = normalizeChannelStateName(ch.state?.state_name) === 'NEGOTIATINGFUNDING';
               return ch.is_acceptor && pk === targetPubkey && isPending;
             });
@@ -154,13 +174,15 @@ export async function prepareInboundLiquidity(
                 const existing = sessions.get(sessionId);
                 if (existing) {
                   existing.channel_id = acceptRes.channel_id;
+                  channelIdToSessionId.set(acceptRes.channel_id.toLowerCase(), sessionId);
                   existing.status = 'provisioning_liquidity';
                   existing.message = `Inbound channel offer accepted (${acceptRes.channel_id}). External funding collaboration in progress.`;
                 }
                 accepted = true;
                 break;
-              } catch {
-                // Transient accept failure; retry on subsequent cycle
+              } catch (acceptErr) {
+                lastAcceptError = acceptErr instanceof Error ? acceptErr.message : String(acceptErr);
+                console.warn(`[Bootstrap Watcher] acceptChannel failed on ${pending.channel_id}:`, lastAcceptError);
               }
             }
 
@@ -174,7 +196,8 @@ export async function prepareInboundLiquidity(
             const existing = sessions.get(sessionId);
             if (existing && existing.status === 'waiting_for_channel') {
               existing.status = 'failed';
-              existing.message = 'Timed out waiting for open_channel_with_external_funding offer from user node.';
+              const detail = lastAcceptError ? ` Last error: ${lastAcceptError}` : '';
+              existing.message = `Timed out waiting for open_channel_with_external_funding offer from user node.${detail}`;
             }
           }
         } catch (err) {
