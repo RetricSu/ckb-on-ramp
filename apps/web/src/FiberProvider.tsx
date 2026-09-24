@@ -18,7 +18,18 @@ const UDT_WHITELIST: NonNullable<UseFiberNodeOptions['nodeConfig']>['udtWhitelis
 type FiberState = ReturnType<typeof useFiberNode>;
 const FiberContext = createContext<FiberState | null>(null);
 export function FiberProvider({ children }: { children: ReactNode }) {
-  const fiber = useFiberNode({ network: 'testnet', enabled: true, nodeConfig: { udtWhitelist: UDT_WHITELIST } });
+  const fiber = useFiberNode({
+    network: 'testnet',
+    enabled: true,
+    // Operator signs funding; omit the browser CKB key (fiber-pay external funding mode).
+    externalWallet: true,
+    nodeConfig: {
+      udtWhitelist: UDT_WHITELIST,
+      logLevel: import.meta.env.DEV ? 'debug' : 'info',
+      // Same-origin proxy: COEP blocks browser Fiber WASM from public CKB RPCs.
+      ckbRpcUrl: `${typeof window === 'undefined' ? 'http://localhost:5174' : window.location.origin}/ckb-rpc`,
+    },
+  });
 
   useEffect(() => {
     if (!fiber.isRunning || !fiber.node) return;

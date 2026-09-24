@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { BootstrapRequest, BootstrapSession, NodeInfo } from '@ckb-on-ramp/contracts';
 import type { Script } from '@fiber-pay/sdk/browser';
-import { isMockPeerAddress, pickPeerAddress, prepareReceiveRoute } from './peer.js';
+import { isMockPeerAddress, pickPeerAddress, prepareReceiveRoute, waitForConnectedPeer } from './peer.js';
 
 describe('Peer address picker and route preparation', () => {
   describe('pickPeerAddress', () => {
@@ -89,6 +89,28 @@ describe('Peer address picker and route preparation', () => {
     it('returns false for null or undefined', () => {
       assert.equal(isMockPeerAddress(null), false);
       assert.equal(isMockPeerAddress(undefined), false);
+    });
+  });
+
+  describe('waitForConnectedPeer', () => {
+    const operator = '0297771e6bf2d2dbc48df6d5b316c0a91b71f3be4c8823218d98b709e8528faebf';
+
+    it('returns once listPeers includes the operator pubkey', async () => {
+      let calls = 0;
+      await waitForConnectedPeer(async () => {
+        calls += 1;
+        return {
+          peers: calls < 2 ? [] : [{ pubkey: `0x${operator}` }],
+        };
+      }, operator, 2_000);
+      assert.equal(calls >= 2, true);
+    });
+
+    it('times out when the peer never appears', async () => {
+      await assert.rejects(
+        () => waitForConnectedPeer(async () => ({ peers: [] }), operator, 50),
+        /Timed out waiting to connect to operator peer/,
+      );
     });
   });
 

@@ -5,6 +5,15 @@ import crossOriginIsolation from 'vite-plugin-cross-origin-isolation';
 export default defineConfig({
   envDir: '../..',
   plugins: [react(), crossOriginIsolation()],
+  server: {
+    proxy: {
+      '/ckb-rpc': {
+        target: 'https://testnet.ckb.dev',
+        changeOrigin: true,
+        rewrite: () => '/rpc',
+      },
+    },
+  },
   optimizeDeps: { exclude: ['@nervosnetwork/fiber-js'] },
   preview: {
     headers: {
