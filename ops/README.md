@@ -1,99 +1,139 @@
-# Local e2e stack
+# Local protocol e2e stack
 
-Bring up Bitcoin Lightning, CKB Fiber, and the CCH bridge on one machine so you can walk the on-ramp protocol without testnet faucets.
+This runbook exercises the Lightning → CCH → Fiber protocol entirely on a local development network, without testnet faucets or the browser app.
 
-## What the product does
+It is intentionally separate from the website workflow:
 
-```
+| | Protocol stack in this folder | Website (`npm run dev`) |
+| --- | --- | --- |
+| CKB | offckb devnet | CKB testnet |
+| User Fiber node | offckb FNN node 2 (CLI) | Browser WASM with `network: 'testnet'` |
+| Operator Fiber | offckb FNN node 1 | Testnet fiber-pay operator |
+| Wrapped BTC | Local xUDT issued by the script | Testnet cWBTC |
+| Invoice currency | `Fibd` | `Fibt` |
+
+Do not use this stack as a reason to change `apps/web/src/FiberProvider.tsx`, point Vite at offckb, or substitute the website's cWBTC script. A web node on testnet cannot use the devnet xUDT or a `Fibd` invoice.
+
+## What it runs
+
+```text
 user LND  --pays BOLT11 hold invoice-->  CCH LND
                                               |
                                          same payment_hash
                                               v
-browser/CLI Fiber node  <--UDT (cWBTC)---  operator Fiber (FNN + CCH)
+user FNN  <--local xUDT over Fiber--  operator FNN + standalone CCH
 ```
 
-1. User Fiber node starts (browser WASM on testnet, or a local FNN here).
-2. Operator funds an inbound UDT channel to that node (Scheme B: ~200 CKB capacity + cWBTC).
-3. User signs a Fiber invoice (`sha256`, wrapped-BTC UDT).
-4. Backend calls CCH `receive_btc`; CCH creates an LND hold invoice with the same payment hash.
-5. User pays that BOLT11 from **their own** LND (this repo never takes a macaroon).
-6. CCH pays the Fiber invoice; the user node reveals the preimage; CCH settles the hold invoice.
+`stack:up` starts and prepares:
 
-LND pays a Lightning invoice, not the `fibt`/`fibd` string.
-
-## Two ways to run it
-
-| | Local CLI (this folder) | Web app |
-|---|---|---|
-| CKB | offckb devnet | CKB testnet |
-| Fiber | offckb FNN node 1 (operator) + node 2 (user) | Browser WASM (`network: 'testnet'`) + fiber-pay operator |
-| BTC | bitcoind regtest + 2 LND containers | same local LND, or a real testnet LND |
-| Invoice currency | `Fibd` | `Fibt` |
-| Wrapped BTC | offckb xUDT issued for e2e | testnet cWBTC |
-
-The Vite app is still locked to testnet WASM + the testnet cWBTC script. Use `stack.sh e2e` for a full local protocol run. Pointing the website at this stack needs a later FiberProvider/UDT change.
+- bitcoind regtest plus `lnd-user` and `lnd-cch` in Docker;
+- one offckb CKB devnet and two offckb FNN nodes;
+- a local xUDT, issued to the devnet accounts;
+- Lightning and Fiber channels with the required direction of liquidity;
+- standalone CCH from the FNN binary downloaded through `fiber-pay`.
 
 ## Prerequisites
 
-- Docker Desktop running
-- `offckb` (`0.5.0-canary` or later with Fiber support)
-- `fiber-pay` `0.3.0` (used to download `fnn v0.9.0` for standalone CCH)
-- `python3`, `jq`, `openssl`
-- Node 22+ if you also run `npm run dev`
+- Node.js 22+ and npm 10+ (the root `npm run stack:*` wrappers).
+- Docker Desktop installed and running.
+- `offckb` 0.5.0-canary or later with Fiber support.
+- `fiber-pay` 0.3.0.
+- `python3`, `jq`, and `openssl` on `PATH`.
 
-Do not reuse `~/.fiber-pay` or the `/tmp/ckb-on-ramp-poc` nodes. This stack keeps data under `ops/data/`.
+Install repository dependencies with `npm install` if this is a fresh worktree.
 
-## Commands
+No testnet `OPERATOR_CKB_PRIVATE_KEY` is required here. The script uses pre-funded offckb devnet accounts, generates its local secrets under gitignored `ops/data/`, and sets `SKIP_CAPACITY_GIFT=1`. Treat `ops/data/` as secret local state anyway: it contains keys and LND credentials, so do not publish or commit it.
+
+## Start, inspect, verify, and stop
+
+Run these commands from the repository root:
 
 ```bash
-npm run stack:up        # bitcoind+LND, offckb CKB/Fiber, CCH, channels
+npm run stack:up
 npm run stack:status
-npm run stack:e2e       # Fiber invoice → user LND pays → UDT arrives
-npm run stack:down      # stop processes; keeps ops/data
+npm run stack:e2e
+npm run stack:down
 ```
 
-Equivalent: `bash ops/stack.sh up`.
+- `stack:up` starts every service, issues/reuses the local xUDT, opens the channels, and waits until they are usable. The first run may take longer while offckb and fiber-pay download/start FNN components.
+- `stack:status` shows Docker services, LND sync/channel state, offckb Fiber status, and the standalone CCH process. It is safe to run repeatedly.
+- `stack:e2e` creates a `Fibd` invoice on the user FNN for the local xUDT, calls CCH `receive_btc`, pays the returned BOLT11 hold invoice from `lnd-user`, waits for CCH success, and confirms that the user Fiber invoice settled. `E2E PASS` means that protocol chain completed; it does **not** verify browser WASM, passkeys, testnet cWBTC, or the website UI.
+- `stack:down` stops CCH, offckb/FNN, bitcoind, and both LND containers. It keeps `ops/data/`, so the next start can reuse the chain and wallet state.
 
-`stack:up` writes `ops/runtime.env`. If the repo has no `.env` yet, it copies that file so `npm run dev` talks to the local operator Fiber (`FNN_RPC_URL`) and standalone CCH (`CCH_RPC_URL`).
+Equivalent direct command: `bash ops/stack.sh <up|status|e2e|down|logs>`.
+
+To inspect recent CCH and Docker logs:
+
+```bash
+bash ops/stack.sh logs
+```
+
+## Generated environment files
+
+`stack:up` writes gitignored `ops/runtime.env` with local endpoints, including:
+
+```dotenv
+FNN_RPC_URL=http://127.0.0.1:21714
+CCH_RPC_URL=http://127.0.0.1:8227
+CKB_RPC_URL=http://127.0.0.1:8114
+SKIP_CAPACITY_GIFT=1
+```
+
+If the repository has no `.env`, the script also copies `ops/runtime.env` to `.env`; it never overwrites an existing `.env`.
+
+These values describe the protocol harness. `FNN_RPC_URL` is its local operator FNN and `CCH_RPC_URL` is its standalone CCH. They are not valid website-path settings because the browser remains on testnet with testnet cWBTC. Before later running the website, replace an ops-generated `.env` with the testnet operator configuration described in the root [README](../README.md).
+
+The testnet-only `OPERATOR_CKB_PRIVATE_KEY` in `.env.example` is deliberately unused by this local stack. Never add a real private key to `.env.example` or git; `.env`, `ops/runtime.env`, and `ops/data/` are gitignored.
 
 ## Ports
 
 | Service | Port |
-|---|---|
+| --- | --- |
 | bitcoind RPC | 18443 |
 | CCH LND gRPC | 10009 |
 | user LND gRPC | 11009 |
 | offckb CKB | 8114 |
-| operator Fiber | 21714 |
-| user Fiber | 21715 |
+| operator FNN | 21714 |
+| user FNN | 21715 |
 | standalone CCH | 8227 |
-| API (app) | 3001 |
-| web (app) | 5173 |
 
-## Paying a hold invoice yourself
+## Manual Lightning inspection
 
-After `stack:up` / `stack:e2e` you can also pay with:
+Pay a returned BOLT11 from the user LND:
 
 ```bash
 docker compose -f ops/docker-compose.yml --project-directory ops \
   exec lnd-user lncli --network=regtest payinvoice --force <bolt11>
 ```
 
-CCH LND:
+Inspect the CCH-side LND:
 
 ```bash
 docker compose -f ops/docker-compose.yml --project-directory ops \
   exec lnd-cch lncli --network=regtest getinfo
 ```
 
-## Reset
+## Troubleshooting
+
+- **`missing required command: docker` or `Docker daemon is not running`:** install/start Docker Desktop, verify `docker info`, and rerun `stack:up`.
+- **A port is already in use:** stop the conflicting local process or the older stack, then retry. Use `stack:status` and `bash ops/stack.sh logs` to identify what is already running.
+- **offckb Fiber refuses to start because genesis has no Fiber contracts:** the existing offckb devnet predates Fiber support. Reset that local chain as shown below.
+- **`stack:e2e` says the stack or CCH is missing:** run `stack:up` first and check `stack:status`; the e2e command does not start dependencies itself.
+- **You see `Fibt`, cWBTC, passkey, COOP, or COEP errors:** those belong to the separate browser/testnet path. This CLI run should use `Fibd` and the xUDT recorded in `ops/data/udt.json`.
+
+## Reset local state
+
+Normally, keep the state and use `npm run stack:down`. For a clean protocol stack reset:
 
 ```bash
 npm run stack:down
 rm -rf ops/data
+npm run stack:up
 ```
 
-If `offckb fiber start` refuses because the existing local chain has no Fiber contracts in genesis:
+`ops/data` is generated and gitignored, but deleting it removes local keys, LND wallets, logs, and cached stack state.
+
+If only the offckb chain is incompatible with Fiber genesis contracts:
 
 ```bash
 offckb node stop --force
@@ -101,35 +141,4 @@ offckb clean
 npm run stack:up
 ```
 
-`offckb clean` deletes the local CKB chain. It does not touch this git repo.
-
-## Testnet (web app)
-
-The Vite app talks to CKB **testnet** Fiber + the local LND pair. A testnet operator FNN with in-process CCH lives at `ops/data/testnet-operator/` (gitignored).
-
-Already wired on this machine:
-
-- Operator Fiber/CCH RPC `http://127.0.0.1:8227` (WS P2P `127.0.0.1:8228`)
-- Operator funded with testnet CKB + 100 cWBTC from https://faucet-cwbtc.ckb.dev/
-- Gift wallet in `.env` as `OPERATOR_CKB_PRIVATE_KEY` (~10k CKB for Scheme B)
-- User pays hold invoices with local `lnd-user` (regtest)
-
-Restart the operator after a reboot:
-
-```bash
-# keep LND up
-npm run stack:up   # or: bash ops/stack.sh lightning
-
-DIR="$(pwd)/ops/data/testnet-operator"
-fiber-pay --data-dir "$DIR" --network testnet \
-  --key-password "$(cat "$DIR/.key-password")" \
-  node start --daemon --quiet-fnn
-
-npm run dev
-```
-
-If port 5173 is already taken, stop that process or run the web app on another port and set `CORS_ORIGIN` to match.
-
-More cWBTC: paste the operator funding address into https://faucet-cwbtc.ckb.dev/ (cooldown 24h per address).
-
-Phase-1 still gifts spendable CKB to the user address (empty-channel force-close farming). Next: operator external funding — [docs/external-funding-lsp.md](../docs/external-funding-lsp.md).
+`offckb clean` deletes the offckb local chain; it does not touch this repository.
