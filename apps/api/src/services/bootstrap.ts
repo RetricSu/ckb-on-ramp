@@ -6,14 +6,22 @@ import { cchGateway, type CchGateway } from './cch.js';
 
 import { redactSecret } from '../utils/redact.js';
 import { getOperatorSigner } from './operatorSigner.js';
+import {
+  assertWithinFundingLimit,
+  getReceiveReadiness,
+  type OperatorInventory,
+} from './fundingAvailability.js';
+import {
+  FileBootstrapSessionStore,
+  type BootstrapSessionStore,
+} from './bootstrapStore.js';
 
 const CKB_TESTNET_ADDRESS_REGEX = /^ckt1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38,120}$/i;
 const SECP256K1_PUBKEY_REGEX = /^(0x)?[0-9a-fA-F]{66}$/;
 
 const MAX_BOOTSTRAP_SESSIONS = 1_000;
-const sessions = new Map<string, BootstrapSession>();
+let activeStore: BootstrapSessionStore = new FileBootstrapSessionStore();
 const sessionTasks = new Map<string, Promise<void>>();
-const channelIdToSessionId = new Map<string, string>();
 
 const trimOldest = <K, V>(map: Map<K, V>) => {
   while (map.size >= MAX_BOOTSTRAP_SESSIONS) {
@@ -23,25 +31,53 @@ const trimOldest = <K, V>(map: Map<K, V>) => {
   }
 };
 
+export function setBootstrapSessionStore(store: BootstrapSessionStore): void {
+  activeStore = store;
+}
+
+export function getBootstrapSessionStore(): BootstrapSessionStore {
+  return activeStore;
+}
+
 export function getBootstrapSession(sessionId: string): BootstrapSession | undefined {
-  return sessions.get(sessionId);
+  return activeStore.get(sessionId);
 }
 
 export function getBootstrapSessionByChannelId(channelId: string): BootstrapSession | undefined {
-  const target = channelId.trim().toLowerCase();
-  const sessionId = channelIdToSessionId.get(target);
-  if (sessionId) {
-    const s = sessions.get(sessionId);
-    if (s) return s;
-    channelIdToSessionId.delete(target);
+  return activeStore.getByChannelId(channelId);
+}
+
+export async function recoverSessionFromFnn(
+  channelId: string,
+  gateway: CchGateway = cchGateway,
+  fundingAmount: string = config.operatorChannelFundingAmount,
+): Promise<BootstrapSession | undefined> {
+  if (!gateway.listChannels) return undefined;
+  try {
+    const target = channelId.trim().toLowerCase();
+    const res = await gateway.listChannels({});
+    const channels = res?.channels ?? [];
+    const matched = channels.find((ch) => String(ch.channel_id ?? '').trim().toLowerCase() === target);
+    if (!matched) return undefined;
+
+    const pubkey = String(matched.pubkey ?? '').replace(/^0x/, '');
+    const reconstructed: BootstrapSession = {
+      session_id: randomUUID(),
+      channel_id: matched.channel_id,
+      status: 'provisioning_liquidity',
+      node_pubkey: pubkey,
+      funding_amount: fundingAmount,
+      expires_at: Date.now() + 5 * 60 * 1000,
+      signed: false,
+      message: 'Reconstructed bootstrap session from FNN list_channels.',
+    };
+
+    activeStore.set(reconstructed.session_id, reconstructed);
+    return reconstructed;
+  } catch (err) {
+    console.warn(`[Bootstrap Recovery] Failed to query FNN for channel ${channelId}:`, err);
+    return undefined;
   }
-  for (const session of sessions.values()) {
-    if (session.channel_id && session.channel_id.toLowerCase() === target) {
-      channelIdToSessionId.set(target, session.session_id);
-      return session;
-    }
-  }
-  return undefined;
 }
 
 export function getBootstrapSessionTask(sessionId: string): Promise<void> | undefined {
@@ -49,9 +85,8 @@ export function getBootstrapSessionTask(sessionId: string): Promise<void> | unde
 }
 
 export function clearBootstrapSessionsForTest(): void {
-  sessions.clear();
+  activeStore.clear();
   sessionTasks.clear();
-  channelIdToSessionId.clear();
 }
 
 export function validateBootstrapRequest(input: Partial<BootstrapRequest>): BootstrapRequest {
@@ -83,6 +118,7 @@ export interface BootstrapDependencies {
   ckbRpcUrl?: string;
   channelFundingAmount?: string;
   skipCapacityGift?: boolean;
+  operatorInventory?: OperatorInventory;
 }
 
 export async function prepareInboundLiquidity(
@@ -100,6 +136,7 @@ export async function prepareInboundLiquidity(
     return {
       session_id: randomUUID(),
       status: 'failed',
+      failure_code: 'not_configured',
       message,
     };
   }
@@ -107,8 +144,27 @@ export async function prepareInboundLiquidity(
   try {
     const gateway = dependencies?.cchGateway ?? cchGateway;
     const rawFundingAmount = dependencies?.channelFundingAmount ?? config.operatorChannelFundingAmount;
-    const fundingAmountHex = '0x' + BigInt(rawFundingAmount).toString(16);
+    const fundingAmount = BigInt(rawFundingAmount);
+    assertWithinFundingLimit(fundingAmount);
+    const fundingAmountHex = '0x' + fundingAmount.toString(16);
     const pubkey = validated.node_pubkey.replace(/^0x/, '');
+
+    const sender = dependencies?.operatorCkbSender ?? getOperatorSigner();
+    const readiness = await getReceiveReadiness({
+      gateway,
+      sender,
+      fundingAmount: rawFundingAmount,
+      externalFunding: validated.external_funding === true,
+      inventory: dependencies?.operatorInventory,
+    });
+    if (!readiness.canReceive) {
+      return {
+        session_id: randomUUID(),
+        status: 'failed',
+        failure_code: 'operator_inventory_insufficient',
+        message: `Operator cannot open a new inbound channel: ${readiness.reason ?? 'inventory is unavailable'}`,
+      };
+    }
 
     // 2. Fetch peer address best-effort
     let peerAddress: string | undefined;
@@ -135,8 +191,7 @@ export async function prepareInboundLiquidity(
         signed: false,
       };
 
-      trimOldest(sessions);
-      sessions.set(sessionId, session);
+      activeStore.set(sessionId, session);
 
       const targetPubkey = pubkey.toLowerCase();
       const task = (async () => {
@@ -176,12 +231,12 @@ export async function prepareInboundLiquidity(
                   temporary_channel_id: pending.channel_id,
                   funding_amount: fundingAmountHex,
                 });
-                const existing = sessions.get(sessionId);
+                const existing = activeStore.get(sessionId);
                 if (existing) {
                   existing.channel_id = acceptRes.channel_id;
-                  channelIdToSessionId.set(acceptRes.channel_id.toLowerCase(), sessionId);
                   existing.status = 'provisioning_liquidity';
                   existing.message = `Inbound channel offer accepted (${acceptRes.channel_id}). External funding collaboration in progress.`;
+                  activeStore.set(sessionId, existing);
                 }
                 accepted = true;
                 break;
@@ -198,20 +253,22 @@ export async function prepareInboundLiquidity(
           }
 
           if (!accepted) {
-            const existing = sessions.get(sessionId);
+            const existing = activeStore.get(sessionId);
             if (existing && existing.status === 'waiting_for_channel') {
               existing.status = 'failed';
               const detail = lastAcceptError ? ` Last error: ${lastAcceptError}` : '';
               existing.message = `Timed out waiting for open_channel_with_external_funding offer from user node.${detail}`;
+              activeStore.set(sessionId, existing);
             }
           }
         } catch (err) {
           const rawMsg = err instanceof Error ? err.message : String(err);
           const sanitizedMsg = redactSecret(rawMsg, operatorPrivateKey, '[REDACTED]');
-          const existing = sessions.get(sessionId);
+          const existing = activeStore.get(sessionId);
           if (existing) {
             existing.status = 'failed';
             existing.message = `Channel acceptance failed: ${sanitizedMsg}`;
+            activeStore.set(sessionId, existing);
           }
         }
       })();
@@ -222,7 +279,7 @@ export async function prepareInboundLiquidity(
       return { ...session };
     }
 
-    const sender = skipCapacityGift
+    const giftSender = skipCapacityGift
       ? undefined
       : dependencies?.operatorCkbSender ??
         (dependencies?.operatorPrivateKey
@@ -230,7 +287,7 @@ export async function prepareInboundLiquidity(
           : getOperatorSigner());
 
     // 1. Submit ≥200 CKB capacity gift unless local e2e skips it (offckb accounts are pre-funded).
-    const giftResult = sender ? await sender.sendCapacityGift(validated.funding_address!, 200) : undefined;
+    const giftResult = giftSender ? await giftSender.sendCapacityGift(validated.funding_address!, 200) : undefined;
 
     // 3. Create in-memory session with gift tx hash and provisioning_liquidity status
     const sessionId = randomUUID();
@@ -244,14 +301,13 @@ export async function prepareInboundLiquidity(
         : 'Skipping CKB capacity gift (SKIP_CAPACITY_GIFT=1). Opening inbound UDT channel.',
     };
 
-    trimOldest(sessions);
-    sessions.set(sessionId, session);
+    activeStore.set(sessionId, session);
 
     // 4. Background task: waitTransaction → FNN open_channel → update session (channel_id)
     const task = (async () => {
       try {
-        if (sender?.waitForTransaction && giftResult?.txHash) {
-          await sender.waitForTransaction(giftResult.txHash);
+        if (giftSender?.waitForTransaction && giftResult?.txHash) {
+          await giftSender.waitForTransaction(giftResult.txHash);
         }
         const openResult = await gateway.openChannel({
           pubkey,
@@ -260,21 +316,23 @@ export async function prepareInboundLiquidity(
           one_way: true,
           public: false,
         });
-        const existing = sessions.get(sessionId);
+        const existing = activeStore.get(sessionId);
         if (existing) {
           existing.channel_id = openResult.channel_id;
           existing.status = 'provisioning_liquidity';
           existing.message = giftResult
             ? `Operator capacity gift confirmed (tx: ${giftResult.txHash}). Channel opening initiated (${openResult.channel_id}). Channel acceptance in progress.`
             : `Channel opening initiated (${openResult.channel_id}). Channel acceptance in progress.`;
+          activeStore.set(sessionId, existing);
         }
       } catch (err) {
         const rawMsg = err instanceof Error ? err.message : String(err);
         const sanitizedMsg = redactSecret(rawMsg, operatorPrivateKey, '[REDACTED]');
-        const existing = sessions.get(sessionId);
+        const existing = activeStore.get(sessionId);
         if (existing) {
           existing.status = 'failed';
           existing.message = `Channel opening failed: ${sanitizedMsg}`;
+          activeStore.set(sessionId, existing);
         }
       }
     })();

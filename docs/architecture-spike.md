@@ -127,7 +127,7 @@ demo README 写过 rc7「同一 `fiber_pay_req` 非幂等」。v0.9.0 actor 对 
 
 ### 3.4 依赖与运行方式（demo 已验证的部分）
 
-- 前端：`npm run dev`（Vite）+ `vite-plugin-cross-origin-isolation`
+- 前端：`npm run dev`（Vite）+ dev/preview 共用的 COOP/COEP/CSP 响应头
 - 后端：`cd backend && npm run dev`（tsx watch，默认 `:3001`）
 - 浏览器节点：`@fiber-pay/react` `useFiberNode({ network: 'testnet' })`，`FiberNodeButton strategy="passkey"`
 - CCH：独立 `fnn` 进程，RPC `127.0.0.1:8227`，`services` 含 `cch`，LND gRPC 仅 localhost

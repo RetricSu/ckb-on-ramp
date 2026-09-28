@@ -5,14 +5,33 @@ import { ApiError, api, isFundingInflightCollision } from './api';
 import { formatCwbtc, parseCwbtc, toHex } from './amount';
 import { CWBTC_SCRIPT, useFiber } from './FiberProvider';
 import { normalizeChannelStateName, waitForCwbtcChannelReady } from './channels';
-import { prepareReceiveRoute, waitForConnectedPeer } from './peer';
+import { pickPeerAddress, prepareReceiveRoute, waitForConnectedPeer } from './peer';
 import { loadReceipts, orderToReceipt, saveReceipt, updateReceiptStatus } from './receipts';
+import {
+  determineAutoResumeStrategy,
+  isPendingStatus,
+  shouldExpireOrderOn404,
+  shouldResumeNode,
+} from './nodeResume';
+import {
+  clearChannelTicket,
+  loadChannelTicket,
+  saveChannelTicket,
+  type ChannelOpeningTicket,
+} from './channelTicket';
 import type { SwapReceipt, SwapStep } from './types';
 
 const LAST_ORDER_KEY = 'ckb-on-ramp:last-order';
 // Fiber invoice final_expiry_delta is milliseconds. Node min is 9_600_000 (160 min);
 // CCH also requires it < half of BTC CLTV (~108_000_000 ms). 24h sits in that window.
 const FIBER_INVOICE_FINAL_EXPIRY_DELTA_MS = 86_400_000n;
+
+function toHexChannelId(val: string): `0x${string}` {
+  if (val.startsWith('0x')) {
+    return val as `0x${string}`;
+  }
+  return `0x${val}`;
+}
 
 export function isCwbtcChannel(channel?: Channel | null): boolean {
   if (!channel || !channel.funding_udt_type_script) return false;
@@ -65,6 +84,8 @@ export function useSwap() {
   // Balances & Receipts
   const [cwbtcBalanceRaw, setCwbtcBalanceRaw] = useState<bigint>(0n);
   const [receipts, setReceipts] = useState<SwapReceipt[]>(loadReceipts);
+  const consecutive404Ref = useRef(0);
+  const autoResumeAttemptedRef = useRef(false);
 
   // Modals
   const [isSettlementOpen, setIsSettlementOpen] = useState(false);
@@ -207,6 +228,7 @@ export function useSwap() {
     const timer = window.setInterval(async () => {
       try {
         const next = await api.getOrder(order.payment_hash);
+        consecutive404Ref.current = 0;
         setOrder(next);
         localStorage.setItem(LAST_ORDER_KEY, JSON.stringify(next));
 
@@ -227,7 +249,10 @@ export function useSwap() {
         }
       } catch (reason) {
         if (reason instanceof ApiError && reason.status === 404) {
-          setOrder((prev) => (prev ? { ...prev, status: 'Expired' } : null));
+          consecutive404Ref.current += 1;
+          if (shouldExpireOrderOn404(consecutive404Ref.current)) {
+            setOrder((prev) => (prev ? { ...prev, status: 'Expired' } : null));
+          }
         }
       }
     }, 1500);
@@ -272,75 +297,318 @@ export function useSwap() {
   }, [receipts, refreshBalance]);
 
   // Unified silent node initializer (using fiberRef to avoid stale closures & fail fast on errors)
-  const ensureNodeRunning = useCallback(async (): Promise<FiberBrowserNode> => {
-    if (fiberRef.current.isRunning && fiberRef.current.node) {
-      return fiberRef.current.node;
-    }
-
-    setProgressTitle('Authorizing Local Wallet');
-    const e2ePassword = import.meta.env.DEV ? String(import.meta.env.VITE_E2E_PASSWORD ?? '').trim() : '';
-    if (e2ePassword) {
-      setProgressMessage('Authorizing browser Fiber node via local password (dev e2e). Your keys stay in this browser.');
-      await fiberRef.current.startWithPassword(e2ePassword);
-    } else {
-      setProgressMessage('Authorizing browser Fiber node via Passkey. Your keys stay in this browser.');
-      if (!fiberRef.current.isPasskeySupported && !fiberRef.current.hasPasskeyConfigured) {
-        const reason =
-          fiberRef.current.passkeyUnavailableReason ||
-          'Passkeys / WebAuthn are not supported in this browser. Please use a modern browser with WebAuthn.';
-        throw new Error(reason);
+  const ensureNodeRunning = useCallback(
+    async (options?: { allowCreate?: boolean }): Promise<FiberBrowserNode> => {
+      const allowCreate = options?.allowCreate ?? true;
+      if (fiberRef.current.isRunning && fiberRef.current.node) {
+        return fiberRef.current.node;
       }
-      if (fiberRef.current.hasPasskeyConfigured) {
-        await fiberRef.current.startWithPasskey();
+
+      setProgressTitle('Authorizing Local Wallet');
+      const e2ePassword = import.meta.env.DEV ? String(import.meta.env.VITE_E2E_PASSWORD ?? '').trim() : '';
+      if (e2ePassword) {
+        setProgressMessage('Authorizing browser Fiber node via local password (dev e2e). Your keys stay in this browser.');
+        await fiberRef.current.startWithPassword(e2ePassword);
       } else {
-        await fiberRef.current.createPasskeyAndStart('CKB On-ramp user');
-      }
-    }
-
-    // Poll fiberRef.current with immediate error checking
-    const maxWait = e2ePassword ? 120_000 : 20_000;
-    const start = Date.now();
-    while (Date.now() - start < maxWait) {
-      const current = fiberRef.current;
-      if (current.error) {
-        const err = current.error;
-        if (
-          err.includes('cancelled') ||
-          err.includes('NotAllowedError') ||
-          err.includes('AbortError') ||
-          err.includes('abort') ||
-          err.includes('cancel')
-        ) {
-          throw new Error('Passkey authorization was cancelled. Click Swap to try again.');
+        setProgressMessage('Authorizing browser Fiber node via Passkey. Your keys stay in this browser.');
+        if (!fiberRef.current.isPasskeySupported && !fiberRef.current.hasPasskeyConfigured) {
+          const reason =
+            fiberRef.current.passkeyUnavailableReason ||
+            'Passkeys / WebAuthn are not supported in this browser. Please use a modern browser with WebAuthn.';
+          throw new Error(reason);
         }
-        throw new Error(`Failed to start Fiber node: ${err}`);
+        if (fiberRef.current.hasPasskeyConfigured) {
+          await fiberRef.current.startWithPasskey();
+        } else if (allowCreate) {
+          await fiberRef.current.createPasskeyAndStart('CKB On-ramp user');
+        } else {
+          throw new Error('Auto-resume forbidden from creating a new passkey; waiting for configured passkey.');
+        }
       }
 
-      if (current.isRunning && current.node) {
-        return current.node;
+      // Poll fiberRef.current with immediate error checking
+      const maxWait = e2ePassword ? 120_000 : 20_000;
+      const start = Date.now();
+      while (Date.now() - start < maxWait) {
+        const current = fiberRef.current;
+        if (current.error) {
+          const err = current.error;
+          if (
+            err.includes('cancelled') ||
+            err.includes('NotAllowedError') ||
+            err.includes('AbortError') ||
+            err.includes('abort') ||
+            err.includes('cancel')
+          ) {
+            throw new Error('Passkey authorization was cancelled. Click Swap to try again.');
+          }
+          throw new Error(`Failed to start Fiber node: ${err}`);
+        }
+
+        if (current.isRunning && current.node) {
+          return current.node;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 150));
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
+      if (fiberRef.current.error) {
+        throw new Error(`Failed to start Fiber node: ${fiberRef.current.error}`);
+      }
+      throw new Error('Local Fiber node took too long to initialize. Please check passkey permissions.');
+    },
+    [],
+  );
 
-    if (fiberRef.current.error) {
-      throw new Error(`Failed to start Fiber node: ${fiberRef.current.error}`);
+  // Helper to connect to operator relay peer
+  const connectOperatorPeer = useCallback(async (node: FiberBrowserNode) => {
+    try {
+      const info = await api.nodeInfo();
+      setOperatorNode(info);
+      const peerAddress = pickPeerAddress(info.addresses);
+      if (peerAddress) {
+        await node.connectPeer({ address: peerAddress, save: true });
+      }
+    } catch (err) {
+      console.warn('[useSwap] Failed to auto-connect to operator peer:', err);
     }
-    throw new Error('Local Fiber node took too long to initialize. Please check passkey permissions.');
   }, []);
 
   // Shared connect action for Navbar
   const connectNode = useCallback(async () => {
     setError(null);
     try {
-      await ensureNodeRunning();
+      const node = await ensureNodeRunning();
+      await connectOperatorPeer(node);
       void refreshBalance();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
       throw err;
     }
-  }, [ensureNodeRunning, refreshBalance]);
+  }, [ensureNodeRunning, connectOperatorPeer, refreshBalance]);
+
+  // Resumes an in-flight channel opening workflow after page refresh
+  const resumeChannelOpening = useCallback(
+    async (node: FiberBrowserNode, ticket: ChannelOpeningTicket) => {
+      setIsProgressOpen(true);
+      setError(null);
+      try {
+        setStep('provisioning_channel');
+        setProgressTitle('Resuming Channel Opening');
+        setProgressMessage('Checking channel status with operator…');
+
+        const opInfo = await api.nodeInfo();
+        setOperatorNode(opInfo);
+
+        let channelId = ticket.channelId;
+        const targetRaw = BigInt(ticket.targetRaw);
+
+        if (
+          ticket.step === 'waiting_for_channel' ||
+          ticket.step === 'waiting_for_accept' ||
+          ticket.step === 'signing_funding'
+        ) {
+          let acceptedChannelId = channelId;
+          const pollSessionStart = Date.now();
+          const sessionTimeoutMs = 30_000;
+          while (Date.now() - pollSessionStart < sessionTimeoutMs) {
+            const s = await api.getBootstrapSession(ticket.sessionId).catch(() => null);
+            if (s) {
+              if (s.status === 'failed') {
+                clearChannelTicket();
+                throw new Error(s.message || 'Operator failed to accept channel offer.');
+              }
+              if (s.status === 'provisioning_liquidity' && s.channel_id) {
+                acceptedChannelId = s.channel_id;
+                break;
+              }
+            }
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+
+          if (!acceptedChannelId) {
+            throw new Error('Timed out waiting for operator node to confirm channel acceptance.');
+          }
+          channelId = acceptedChannelId;
+
+          if (!ticket.unsignedFundingTx) {
+            throw new Error('Cannot resume channel signing without unsigned_funding_tx.');
+          }
+
+          setProgressTitle('Signing Channel Transaction');
+          setProgressMessage('Requesting operator signature for funding capacity…');
+          saveChannelTicket({
+            ...ticket,
+            channelId,
+            step: 'signing_funding',
+          });
+
+          const signResult = await api.signFunding({
+            channel_id: acceptedChannelId,
+            unsigned_funding_tx: ticket.unsignedFundingTx,
+          });
+
+          ticket.signedFundingTx = signResult.signed_funding_tx;
+          ticket.step = 'submitting_funding';
+          saveChannelTicket(ticket);
+        }
+
+        if (ticket.step === 'submitting_funding') {
+          setProgressTitle('Submitting Funding Transaction');
+          setProgressMessage('Submitting signed funding transaction to network…');
+
+          if (!channelId || !ticket.signedFundingTx) {
+            throw new Error('Missing channelId or signed funding tx for submission.');
+          }
+
+          const submitResult = await node.submitSignedFundingTx({
+            channel_id: toHexChannelId(channelId),
+            signed_funding_tx: ticket.signedFundingTx as Record<string, unknown>,
+          });
+
+          channelId = submitResult?.channel_id ?? channelId;
+          ticket.channelId = channelId;
+          ticket.step = 'waiting_for_ready';
+          saveChannelTicket(ticket);
+        }
+
+        if (ticket.step === 'waiting_for_ready') {
+          setProgressTitle('Confirming Inbound Channel');
+          setProgressMessage('Funding transaction submitted. Waiting for on-chain confirmation…');
+
+          channelId = await waitForCwbtcChannelReady({
+            node,
+            sessionId: ticket.sessionId,
+            expectedChannelId: channelId,
+            existingReadyIds: new Set(),
+            minInboundCapacity: targetRaw,
+            isCwbtcChannel,
+            getBootstrapSession: (sid) => api.getBootstrapSession(sid),
+            timeoutMs: 120_000,
+          });
+
+          ticket.step = 'waiting_for_ready';
+          ticket.channelId = channelId;
+          saveChannelTicket(ticket);
+        }
+
+        void refreshBalance();
+
+        // Final safety gate: verify ready cWBTC channel is active before signing invoice
+        const finalChannelCheck = await node.listChannels({});
+        const hasConfirmedReadyChannel = (finalChannelCheck?.channels ?? []).some((ch) => {
+          return normalizeChannelStateName(ch.state?.state_name) === 'CHANNELREADY' && isCwbtcChannel(ch);
+        });
+        if (!hasConfirmedReadyChannel) {
+          throw new Error('No ready cWBTC channel found. A channel must be open to receive funds.');
+        }
+
+        // Step 4: Obtain fresh authoritative quote
+        setStep('creating_invoice');
+        setProgressTitle('Generating Swap Invoices');
+        setProgressMessage('Signing Fiber invoice and preparing Lightning payment…');
+
+        const activeQuote = await api.quote(targetRaw.toString());
+        setQuote(activeQuote);
+
+        // Step 5: Sign Fiber invoice
+        const invoice = await node.newInvoice({
+          amount: toHex(BigInt(activeQuote.receive_raw)),
+          currency: 'Fibt',
+          udt_type_script: CWBTC_SCRIPT,
+          hash_algorithm: 'sha256',
+          final_expiry_delta: toHex(FIBER_INVOICE_FINAL_EXPIRY_DELTA_MS),
+          description: 'CKB On-ramp: BTC to cWBTC',
+        });
+
+        // Step 6: Create CCH order on backend
+        setStep('creating_order');
+        const newOrder = await api.createOrder(
+          {
+            fiber_invoice: invoice.invoice_address,
+            quote_id: activeQuote.quote_id,
+          },
+          crypto.randomUUID(),
+        );
+
+        // Save order & receipt
+        setOrder(newOrder);
+        localStorage.setItem(LAST_ORDER_KEY, JSON.stringify(newOrder));
+        const receipt = orderToReceipt(newOrder, channelId);
+        const updatedReceipts = saveReceipt(receipt);
+        setReceipts(updatedReceipts);
+
+        // Order is safely on disk; clear the opening ticket
+        clearChannelTicket();
+
+        // Only transition to awaiting_payment after order is successfully created and persisted
+        setStep('awaiting_payment');
+        setIsProgressOpen(false);
+        setIsSettlementOpen(true);
+      } catch (err) {
+        // Do NOT clear ticket on transient failure (timeout, network, signing error)
+        // Keep ticket in storage so subsequent refresh/retry can resume channel opening
+        setStep('failed');
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+      }
+    },
+    [refreshBalance],
+  );
+
+  // Auto-resume node on mount or state load
+  useEffect(() => {
+    if (autoResumeAttemptedRef.current) return;
+    if (fiber.isRunning || fiber.isStarting) return;
+
+    const channelTicket = loadChannelTicket();
+    const shouldResume = shouldResumeNode({
+      hasPasskeyConfigured: fiber.hasPasskeyConfigured,
+      pendingOrder: order,
+      pendingReceipts: receipts,
+      pendingChannel: channelTicket,
+    });
+
+    const e2ePassword = import.meta.env.DEV ? String(import.meta.env.VITE_E2E_PASSWORD ?? '').trim() : '';
+    const strategy = determineAutoResumeStrategy({
+      hasPasskeyConfigured: fiber.hasPasskeyConfigured,
+      e2ePassword,
+      shouldResume,
+    });
+
+    // If strategy says wait (e.g. hasPasskeyConfigured is still initializing/false) or none:
+    // DO NOT set autoResumeAttemptedRef! Return and wait for hasPasskeyConfigured to update.
+    if (!strategy.canResume) {
+      return;
+    }
+
+    autoResumeAttemptedRef.current = true;
+
+    void (async () => {
+      try {
+        const node = await ensureNodeRunning({ allowCreate: false });
+        await connectOperatorPeer(node);
+        void refreshBalance();
+
+        if (channelTicket) {
+          await resumeChannelOpening(node, channelTicket);
+        }
+      } catch (err) {
+        console.warn('[AutoResume] Background node resume stopped:', err);
+      }
+    })();
+  }, [
+    fiber.hasPasskeyConfigured,
+    fiber.isRunning,
+    fiber.isStarting,
+    order,
+    receipts,
+    ensureNodeRunning,
+    connectOperatorPeer,
+    refreshBalance,
+    resumeChannelOpening,
+  ]);
 
   // Open a specific receipt in the settlement modal
   const viewReceipt = useCallback((receipt: SwapReceipt) => {
@@ -363,6 +631,10 @@ export function useSwap() {
 
   // Main Swap execution pipeline
   const initiateSwap = useCallback(async () => {
+    if (health?.can_receive === false) {
+      setError(health.unavailable_reason ?? 'The operator cannot receive new swaps right now.');
+      return;
+    }
     if (!parsedTarget.raw) {
       setError('Please enter a valid amount.');
       return;
@@ -439,6 +711,14 @@ export function useSwap() {
 
         // If waiting for external funding channel, user WASM node initiates openChannelWithExternalFunding
         if (route.status === 'waiting_for_channel') {
+          saveChannelTicket({
+            sessionId: route.session_id,
+            channelId: route.channel_id,
+            step: 'waiting_for_channel',
+            targetRaw: parsedTarget.raw!.toString(),
+            createdAt: Date.now(),
+          });
+
           setStep('provisioning_channel');
           setProgressTitle('Opening Sponsored Channel');
 
@@ -470,6 +750,7 @@ export function useSwap() {
           let currentRoute = route;
           let finalSubmitResult: Awaited<ReturnType<typeof node.submitSignedFundingTx>> | undefined;
           let finalOpenResult: Awaited<ReturnType<typeof node.openChannelWithExternalFunding>> | undefined;
+          let finalSignResult: Awaited<ReturnType<typeof api.signFunding>> | undefined;
           let activeSessionId = route.session_id;
 
           for (let inflightAttempt = 0; inflightAttempt < MAX_INFLIGHT_OPEN_RETRIES; inflightAttempt += 1) {
@@ -491,6 +772,13 @@ export function useSwap() {
                 onOperatorNode: setOperatorNode,
               });
               activeSessionId = currentRoute.session_id;
+              saveChannelTicket({
+                sessionId: activeSessionId,
+                channelId: currentRoute.channel_id,
+                step: 'waiting_for_channel',
+                targetRaw: parsedTarget.raw!.toString(),
+                createdAt: Date.now(),
+              });
             }
 
             setProgressMessage('Waiting for operator peer handshake…');
@@ -515,6 +803,14 @@ export function useSwap() {
             }
 
             channelId = openResult.channel_id;
+            saveChannelTicket({
+              sessionId: activeSessionId,
+              channelId: openResult.channel_id,
+              unsignedFundingTx: openResult.unsigned_funding_tx,
+              step: 'signing_funding',
+              targetRaw: parsedTarget.raw!.toString(),
+              createdAt: Date.now(),
+            });
 
             setProgressTitle('Signing Channel Transaction');
             setProgressMessage('Waiting for operator channel acceptance…');
@@ -527,6 +823,7 @@ export function useSwap() {
               const s = await api.getBootstrapSession(activeSessionId).catch(() => null);
               if (s) {
                 if (s.status === 'failed') {
+                  clearChannelTicket();
                   throw new Error(s.message || 'Operator failed to accept channel offer.');
                 }
                 if (s.status === 'provisioning_liquidity' && s.channel_id) {
@@ -559,6 +856,16 @@ export function useSwap() {
               throw signErr;
             }
 
+            saveChannelTicket({
+              sessionId: activeSessionId,
+              channelId: acceptedSession.channel_id,
+              unsignedFundingTx: openResult.unsigned_funding_tx,
+              signedFundingTx: signResult.signed_funding_tx,
+              step: 'submitting_funding',
+              targetRaw: parsedTarget.raw!.toString(),
+              createdAt: Date.now(),
+            });
+
             setProgressTitle('Submitting Funding Transaction');
             setProgressMessage('Submitting signed funding transaction to network…');
 
@@ -567,15 +874,26 @@ export function useSwap() {
               signed_funding_tx: signResult.signed_funding_tx as Record<string, unknown>,
             });
             finalOpenResult = openResult;
+            finalSignResult = signResult;
             break;
           }
 
-          if (!finalOpenResult) {
+          if (!finalOpenResult || !finalSignResult) {
             throw new Error('Failed to complete external funding channel negotiation after retries.');
           }
 
           const finalExpectedChannelId = finalSubmitResult?.channel_id ?? finalOpenResult.channel_id;
           channelId = finalExpectedChannelId;
+
+          saveChannelTicket({
+            sessionId: activeSessionId,
+            channelId: finalExpectedChannelId,
+            unsignedFundingTx: finalOpenResult.unsigned_funding_tx,
+            signedFundingTx: finalSignResult.signed_funding_tx,
+            step: 'waiting_for_ready',
+            targetRaw: parsedTarget.raw!.toString(),
+            createdAt: Date.now(),
+          });
 
           setProgressTitle('Confirming Inbound Channel');
           setProgressMessage('Funding transaction submitted. Waiting for on-chain confirmation…');
@@ -652,6 +970,8 @@ export function useSwap() {
       const updatedReceipts = saveReceipt(receipt);
       setReceipts(updatedReceipts);
 
+      clearChannelTicket();
+
       // Transition to Settlement modal
       setStep('awaiting_payment');
       setIsProgressOpen(false);
@@ -669,9 +989,10 @@ export function useSwap() {
         setError(msg);
       }
     }
-  }, [parsedTarget.raw, ensureNodeRunning, health?.mode]);
+  }, [parsedTarget.raw, ensureNodeRunning, health?.mode, health?.can_receive, health?.unavailable_reason]);
 
   const resetSwap = useCallback(() => {
+    clearChannelTicket();
     setOrder(null);
     setStep('idle');
     setError(null);

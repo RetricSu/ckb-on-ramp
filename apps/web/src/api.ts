@@ -10,7 +10,7 @@ import type {
   SwapOrder,
 } from '@ckb-on-ramp/contracts';
 
-const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) || 'http://localhost:3001/api';
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) || '/api';
 
 export class ApiError extends Error {
   constructor(message: string, public readonly status: number) {

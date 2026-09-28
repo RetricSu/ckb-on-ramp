@@ -31,7 +31,7 @@ cWBTC 用 https://faucet-cwbtc.ckb.dev/ 申领。本地 LND / 运营方进程见
 
 已验证：
 
-- `npm test`：113 个测试全部通过（58 api + 54 web + 1 contracts）。
+- `npm test`：145 个测试全部通过（65 api + 79 web + 1 contracts）。
 - `npm run typecheck`：contracts、api、web 静态类型检查全部通过。
 - `npm run build`：生产构建全部通过。
 
@@ -212,8 +212,38 @@ PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性。2026-09-2
    - 针对 live FNN 缺失 `send_ckb` RPC 的限制，引入 `@ckb-ccc/core` SDK 与 `OPERATOR_CKB_PRIVATE_KEY` 环境变量，实现 `CccOperatorCkbSender` 向用户 `funding_address` 发送 ≥200 CKB 容量预资助并在链上等待确认，随后调用 FNN `open_channel` 发起 cWBTC 通道开通并返回 `provisioning_liquidity` 状态。未配置密钥时保持 501 fail-closed。前端将 `provisioning_liquidity` 视作进行中状态，结合 0-CKB 接受器自动完成建渠协商。
 5. **节点真实 UDT 余额证明与通道双向流转（已完成步骤 7 实测验证）**：
    - 针对 Scheme B 开通的 0-CKB 用户通道，通过 Operator 向 User-Zero 的真实 SHA-256 invoice 发起 `send_payment`（非 dry-run），实测验证了通道 Commitment tx 推进、UDT 到账（`local_balance` 从 `0x0` 增长至 `0x186a0` 即 0.001 cWBTC）及发票状态跃迁为 `Paid`；并实测了 User-Zero 向 Operator 的反向流转支付，确认节点 `READY` 与双向支付能力。
-6. **Passkey / IndexedDB 浏览器 WASM 端到端（部分完成）**：
-   - 本机已用 passkey 起 WASM 节点并完成一笔 testnet 入金。跨刷新恢复、换机、Safari/Firefox 仍未系统测。
+6. **Passkey / IndexedDB 浏览器 WASM 端到端与跨刷新恢复（部分完成）**：
+   - 本机已用 passkey 起 WASM 节点并完成一笔 testnet 入金。
+   - **Chrome 同机同 origin 跨刷新恢复机制（2026-09-24 补齐）**：
+     针对同一 Chrome、同一 origin、同一 passkey，实现了刷新后自动拉起 WASM 节点并续接任务的状态机：
+     - 前端抽出 `shouldResumeNode({ hasPasskeyConfigured, pendingOrder, pendingReceipts, pendingChannel })` 纯函数，若有未完成单、待处理开渠票或已配置 passkey，mount 时自动触发 `startWithPasskey`（允许弹一次系统 passkey）唤醒节点，唤醒后自动重连运营方 peer（`pickPeerAddress` + `connectPeer`）、刷新通道余额并继续 CCH 订单轮询。
+     - 开渠阶段引入前端开渠票 `channelTicket` 持久化到 localStorage（含 `session_id`, `channel_id`, `unsigned_funding_tx`, `signed_funding_tx`, `step`），解决 WASM 重启后无法重新取得 `unsigned_funding_tx` 的隐患。
+     - 服务端 bootstrap sessions 改造为可插拔 `BootstrapSessionStore`（默认落地 `ops/data/bootstrap-sessions.json`），并在 store miss 时基于 FNN `list_channels` 按 `channel_id` 自动重建会话，API 重启后开渠与 `sign-funding` 不中断。
+     - `RpcCchGateway.getOrder` 以 `get_cch_order` 为真相，空缓存不 404；前端取消单次 404 立即标 Expired 的错误行为，采用有限重试门限（`shouldExpireOrderOn404`），仅 CCH 明确终态才停止。
+   - **三种跨刷新场景的 Chrome 手动 E2E 步骤及实测状态**：
+     - **场景 1：开渠中 / 等待 sign-funding 刷新**
+       1. 启动全栈（`bash ops/stack.sh up`）并在 Chrome 中打开 `http://localhost:5173`。
+       2. 输入金额点击 Swap，授权 passkey 启动节点。
+       3. 用户 WASM 节点发起 `openChannelWithExternalFunding` 生成 `unsigned_funding_tx` 并写入本地开渠票。
+       4. 在看到进度弹窗「等待运营方接受要约」或「请求运营方签名」时，立即按 Cmd+R 刷新。
+       5. 刷新后页面检测到开渠票，自动通过 passkey 拉起节点并重连 peer。
+       6. 前端从开渠票读出 `unsigned_funding_tx` 向 `/api/sign-funding` 提交签名（即使 API 刚重启，服务端也从 FNN 重建会话），节点收到签名后提交广播，继续等待链上确认并出票。
+       - *实测状态*：**未跑（未在 Chrome 手动跑过，全流程由自动化测试模拟覆盖）**。
+     - **场景 2：已出 Lightning 发票、尚未支付刷新**
+       1. 正常开渠推进到结算弹窗，展示 Lightning Invoice（`lnbcrt...`），订单状态为 `Pending`。
+       2. 不付发票，直接刷新页面（Cmd+R）。
+       3. 页面从 localStorage 恢复订单并重新打开结算弹窗；`shouldResumeNode` 自动拉起 WASM 节点并重连 peer。
+       4. 前端恢复轮询 `/api/orders/:payment_hash`；API 即使重启，也通过 `get_cch_order` 返回 `Pending`，不误报 `Expired`。
+       5. 用户随后用钱包支付发票即可正常结算。
+       - *实测状态*：**未跑（未在 Chrome 手动跑过，由单测覆盖持久化与恢复判定）**。
+     - **场景 3：已支付、尚未 Fiber 结算刷新**
+       1. 进入结算弹窗展示 Lightning 发票后，在终端用 `lncli payinvoice --force <bolt11>` 发起支付。
+       2. 在支付已发出但 Fiber 结算未完成（节点尚未揭示 preimage、cWBTC 尚未进账）的窗口期，立即刷新或关页再开。
+       3. 页面重新打开后自动拉起 WASM 节点并连上运营方 peer。
+       4. 节点恢复在线后，CCH 的出站 Fiber 支付完成握手，节点揭示 preimage，cWBTC 到账，本地余额增加。
+       5. CCH 结算 hold invoice，前端轮询到 `Success`，弹窗变绿。
+       - *实测状态*：**未跑（未在 Chrome 手动跑过，待真机全栈联调验证）**。
+   - 跨机迁移（device-switch）、Safari/Firefox PRF 支持依然不在当前范围，保持未测状态。
 7. **BTC / CCH 闭环（开发者环境已完成；主网/公网 LND 未做）**：
    - 运营方 FNN 进程内 CCH + 本地 regtest LND 已跑通 hold invoice。用户侧仍是自己的 LND（本机 `lnd-user`），后端不托管 macaroon。
 8. **运营方外部出资开渠（下一步，见 [external-funding-lsp.md](./external-funding-lsp.md)）**：
