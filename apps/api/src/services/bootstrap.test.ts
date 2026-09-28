@@ -10,8 +10,10 @@ import {
   getBootstrapSession,
   getBootstrapSessionTask,
   prepareInboundLiquidity,
+  setBootstrapSessionStore,
   validateBootstrapRequest,
 } from './bootstrap.js';
+import { MemoryBootstrapSessionStore } from './bootstrapStore.js';
 import { CccOperatorCkbSender, type OperatorCkbSender } from './ccc.js';
 import type { CchGateway, OpenChannelParams, OpenChannelResult } from './cch.js';
 
@@ -23,6 +25,7 @@ const DUMMY_OPERATOR_KEY = '0x' + '1234567890abcdef'.repeat(4);
 
 describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
   beforeEach(() => {
+    setBootstrapSessionStore(new MemoryBootstrapSessionStore());
     clearBootstrapSessionsForTest();
   });
 
