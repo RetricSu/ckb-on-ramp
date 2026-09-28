@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HealthResponse, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
 import type { Channel, FiberBrowserNode } from '@fiber-pay/sdk/browser';
-import { ApiError, api } from './api';
+import { ApiError, api, isFundingInflightCollision } from './api';
 import { formatCwbtc, parseCwbtc, toHex } from './amount';
 import { CWBTC_SCRIPT, useFiber } from './FiberProvider';
 import { normalizeChannelStateName, waitForCwbtcChannelReady } from './channels';
@@ -721,15 +721,11 @@ export function useSwap() {
 
           setStep('provisioning_channel');
           setProgressTitle('Opening Sponsored Channel');
-          setProgressMessage('Initiating channel with operator external funding…');
 
           const opInfo = route.operatorNode;
           if (!opInfo.funding_lock_script) {
             throw new Error('Operator node did not advertise a funding_lock_script for external funding.');
           }
-
-          setProgressMessage('Waiting for operator peer handshake…');
-          await waitForConnectedPeer(() => node.listPeers(), opInfo.node_id);
 
           const ensureHex = (val: string): `0x${string}` => (val.startsWith('0x') ? val : `0x${val}`) as `0x${string}`;
 
@@ -749,92 +745,151 @@ export function useSwap() {
             funding_fee_rate: '0x7d0' as `0x${string}`,
             public: false,
           };
-          let openResult: Awaited<ReturnType<typeof node.openChannelWithExternalFunding>> | undefined;
-          let lastOpenError: string | undefined;
-          for (let attempt = 0; attempt < 5; attempt += 1) {
-            try {
-              openResult = await node.openChannelWithExternalFunding(openParams);
-              break;
-            } catch (openErr) {
-              lastOpenError = openErr instanceof Error ? openErr.message : String(openErr);
-              if (!lastOpenError.toLowerCase().includes('not connected') || attempt === 4) {
-                throw openErr;
-              }
-              await waitForConnectedPeer(() => node.listPeers(), opInfo.node_id, 8_000);
+
+          const MAX_INFLIGHT_OPEN_RETRIES = 5;
+          let currentRoute = route;
+          let finalSubmitResult: Awaited<ReturnType<typeof node.submitSignedFundingTx>> | undefined;
+          let finalOpenResult: Awaited<ReturnType<typeof node.openChannelWithExternalFunding>> | undefined;
+          let finalSignResult: Awaited<ReturnType<typeof api.signFunding>> | undefined;
+          let activeSessionId = route.session_id;
+
+          for (let inflightAttempt = 0; inflightAttempt < MAX_INFLIGHT_OPEN_RETRIES; inflightAttempt += 1) {
+            if (inflightAttempt > 0) {
+              setProgressTitle('Re-opening Sponsored Channel');
+              setProgressMessage(`Gift UTXO collision detected. Re-opening channel with fresh UTXOs (attempt ${inflightAttempt + 1}/${MAX_INFLIGHT_OPEN_RETRIES})…`);
+
+              // Exponential backoff before full restart so conflicting transactions can settle or WASM node picks different cells
+              await new Promise((r) => setTimeout(r, 1000 * inflightAttempt));
+
+              // Request a fresh bootstrap session from operator (整段重开)
+              currentRoute = await prepareReceiveRoute({
+                nodePubkey,
+                defaultFundingLockScript: nodeInfo.default_funding_lock_script,
+                connectPeer: (params) => node.connectPeer(params),
+                getNodeInfo: () => api.nodeInfo(),
+                bootstrap: (request) => api.bootstrap(request),
+                mode: health?.mode,
+                onOperatorNode: setOperatorNode,
+              });
+              activeSessionId = currentRoute.session_id;
+              saveChannelTicket({
+                sessionId: activeSessionId,
+                channelId: currentRoute.channel_id,
+                step: 'waiting_for_channel',
+                targetRaw: parsedTarget.raw!.toString(),
+                createdAt: Date.now(),
+              });
             }
-          }
-          if (!openResult) {
-            throw new Error(lastOpenError || 'Failed to open channel with operator external funding.');
-          }
 
-          channelId = openResult.channel_id;
-          saveChannelTicket({
-            sessionId: route.session_id,
-            channelId: openResult.channel_id,
-            unsignedFundingTx: openResult.unsigned_funding_tx,
-            step: 'signing_funding',
-            targetRaw: parsedTarget.raw!.toString(),
-            createdAt: Date.now(),
-          });
+            setProgressMessage('Waiting for operator peer handshake…');
+            await waitForConnectedPeer(() => node.listPeers(), opInfo.node_id);
 
-          setProgressTitle('Signing Channel Transaction');
-          setProgressMessage('Waiting for operator channel acceptance…');
-
-          // Poll server bootstrap session until operator FNN acceptance is confirmed
-          const pollSessionStart = Date.now();
-          const sessionTimeoutMs = 30_000;
-          let acceptedSession = route;
-          while (Date.now() - pollSessionStart < sessionTimeoutMs) {
-            const s = await api.getBootstrapSession(route.session_id).catch(() => null);
-            if (s) {
-              if (s.status === 'failed') {
-                clearChannelTicket();
-                throw new Error(s.message || 'Operator failed to accept channel offer.');
-              }
-              if (s.status === 'provisioning_liquidity' && s.channel_id) {
-                acceptedSession = { ...route, ...s };
+            let openResult: Awaited<ReturnType<typeof node.openChannelWithExternalFunding>> | undefined;
+            let lastOpenError: string | undefined;
+            for (let attempt = 0; attempt < 5; attempt += 1) {
+              try {
+                openResult = await node.openChannelWithExternalFunding(openParams);
                 break;
+              } catch (openErr) {
+                lastOpenError = openErr instanceof Error ? openErr.message : String(openErr);
+                if (!lastOpenError.toLowerCase().includes('not connected') || attempt === 4) {
+                  throw openErr;
+                }
+                await waitForConnectedPeer(() => node.listPeers(), opInfo.node_id, 8_000);
               }
             }
-            await new Promise((r) => setTimeout(r, 1000));
+            if (!openResult) {
+              throw new Error(lastOpenError || 'Failed to open channel with operator external funding.');
+            }
+
+            channelId = openResult.channel_id;
+            saveChannelTicket({
+              sessionId: activeSessionId,
+              channelId: openResult.channel_id,
+              unsignedFundingTx: openResult.unsigned_funding_tx,
+              step: 'signing_funding',
+              targetRaw: parsedTarget.raw!.toString(),
+              createdAt: Date.now(),
+            });
+
+            setProgressTitle('Signing Channel Transaction');
+            setProgressMessage('Waiting for operator channel acceptance…');
+
+            // Poll server bootstrap session until operator FNN acceptance is confirmed
+            const pollSessionStart = Date.now();
+            const sessionTimeoutMs = 30_000;
+            let acceptedSession = currentRoute;
+            while (Date.now() - pollSessionStart < sessionTimeoutMs) {
+              const s = await api.getBootstrapSession(activeSessionId).catch(() => null);
+              if (s) {
+                if (s.status === 'failed') {
+                  clearChannelTicket();
+                  throw new Error(s.message || 'Operator failed to accept channel offer.');
+                }
+                if (s.status === 'provisioning_liquidity' && s.channel_id) {
+                  acceptedSession = { ...currentRoute, ...s };
+                  break;
+                }
+              }
+              await new Promise((r) => setTimeout(r, 1000));
+            }
+
+            if (!acceptedSession.channel_id) {
+              throw new Error('Timed out waiting for operator node to confirm channel acceptance.');
+            }
+
+            setProgressMessage('Requesting operator signature for funding capacity…');
+            let signResult: Awaited<ReturnType<typeof api.signFunding>> | undefined;
+            try {
+              signResult = await api.signFunding({
+                channel_id: acceptedSession.channel_id,
+                unsigned_funding_tx: openResult.unsigned_funding_tx,
+              });
+            } catch (signErr) {
+              if (isFundingInflightCollision(signErr) && inflightAttempt < MAX_INFLIGHT_OPEN_RETRIES - 1) {
+                console.warn(
+                  `[useSwap] sign-funding 409 collision on attempt ${inflightAttempt + 1}, retrying full open flow:`,
+                  signErr instanceof Error ? signErr.message : String(signErr),
+                );
+                continue; // Whole segment retry!
+              }
+              throw signErr;
+            }
+
+            saveChannelTicket({
+              sessionId: activeSessionId,
+              channelId: acceptedSession.channel_id,
+              unsignedFundingTx: openResult.unsigned_funding_tx,
+              signedFundingTx: signResult.signed_funding_tx,
+              step: 'submitting_funding',
+              targetRaw: parsedTarget.raw!.toString(),
+              createdAt: Date.now(),
+            });
+
+            setProgressTitle('Submitting Funding Transaction');
+            setProgressMessage('Submitting signed funding transaction to network…');
+
+            finalSubmitResult = await node.submitSignedFundingTx({
+              channel_id: openResult.channel_id,
+              signed_funding_tx: signResult.signed_funding_tx as Record<string, unknown>,
+            });
+            finalOpenResult = openResult;
+            finalSignResult = signResult;
+            break;
           }
 
-          if (!acceptedSession.channel_id) {
-            throw new Error('Timed out waiting for operator node to confirm channel acceptance.');
+          if (!finalOpenResult || !finalSignResult) {
+            throw new Error('Failed to complete external funding channel negotiation after retries.');
           }
 
-          setProgressMessage('Requesting operator signature for funding capacity…');
-          const signResult = await api.signFunding({
-            channel_id: acceptedSession.channel_id,
-            unsigned_funding_tx: openResult.unsigned_funding_tx,
-          });
-
-          saveChannelTicket({
-            sessionId: route.session_id,
-            channelId: acceptedSession.channel_id,
-            unsignedFundingTx: openResult.unsigned_funding_tx,
-            signedFundingTx: signResult.signed_funding_tx,
-            step: 'submitting_funding',
-            targetRaw: parsedTarget.raw!.toString(),
-            createdAt: Date.now(),
-          });
-
-          setProgressTitle('Submitting Funding Transaction');
-          setProgressMessage('Submitting signed funding transaction to network…');
-
-          const submitResult = await node.submitSignedFundingTx({
-            channel_id: openResult.channel_id,
-            signed_funding_tx: signResult.signed_funding_tx as Record<string, unknown>,
-          });
-
-          const finalExpectedChannelId = submitResult?.channel_id ?? openResult.channel_id;
+          const finalExpectedChannelId = finalSubmitResult?.channel_id ?? finalOpenResult.channel_id;
           channelId = finalExpectedChannelId;
 
           saveChannelTicket({
-            sessionId: route.session_id,
+            sessionId: activeSessionId,
             channelId: finalExpectedChannelId,
-            unsignedFundingTx: openResult.unsigned_funding_tx,
-            signedFundingTx: signResult.signed_funding_tx,
+            unsignedFundingTx: finalOpenResult.unsigned_funding_tx,
+            signedFundingTx: finalSignResult.signed_funding_tx,
             step: 'waiting_for_ready',
             targetRaw: parsedTarget.raw!.toString(),
             createdAt: Date.now(),
@@ -845,7 +900,7 @@ export function useSwap() {
 
           channelId = await waitForCwbtcChannelReady({
             node,
-            sessionId: route.session_id,
+            sessionId: activeSessionId,
             expectedChannelId: finalExpectedChannelId,
             existingReadyIds,
             minInboundCapacity: parsedTarget.raw!,

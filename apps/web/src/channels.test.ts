@@ -16,6 +16,7 @@ import {
   startChannelAcceptor,
   type ChannelAcceptorClient,
 } from './channels.js';
+import { ApiError, isFundingInflightCollision } from './api.js';
 
 function createMockChannel(overrides: Partial<Channel> = {}): Channel {
   return {
@@ -379,6 +380,30 @@ describe('Channel Acceptor (Scheme B Zero-CKB Inbound Acceptance)', () => {
       } finally {
         controller.stop();
       }
+    });
+  });
+
+  describe('isFundingInflightCollision', () => {
+    it('detects ApiError with HTTP 409 status', () => {
+      const err = new ApiError('Outpoint(s) already in flight', 409);
+      assert.equal(isFundingInflightCollision(err), true);
+    });
+
+    it('detects generic objects with status 409', () => {
+      assert.equal(isFundingInflightCollision({ status: 409 }), true);
+    });
+
+    it('detects the API inflight error text without requiring status', () => {
+      assert.equal(isFundingInflightCollision(new Error('Outpoint(s) already in flight')), true);
+    });
+
+    it('returns false for unrelated errors or non-409 statuses', () => {
+      assert.equal(isFundingInflightCollision(null), false);
+      assert.equal(isFundingInflightCollision(undefined), false);
+      assert.equal(isFundingInflightCollision(new ApiError('Bad Request', 400)), false);
+      assert.equal(isFundingInflightCollision(new Error('Network error')), false);
+      assert.equal(isFundingInflightCollision(new ApiError('channel (0x409abc) expired', 400)), false);
+      assert.equal(isFundingInflightCollision(new Error('UTXO collision detected')), false);
     });
   });
 });

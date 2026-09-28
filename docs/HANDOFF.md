@@ -26,11 +26,12 @@ cWBTC 用 https://faucet-cwbtc.ckb.dev/ 申领。本地 LND / 运营方进程见
   5. 矿工费与容量预算闸：输入总容量 ≤ 500 CKB，矿工费 ≤ 0.1 CKB。
 - 会话绑定与防重放：强制绑定已 accept 的会话，5 分钟 TTL，签名后立即原子标记 `signed = true`，重复提交直接拒签。
 - 用户节点调用 `submitSignedFundingTx` 广播交易，找零自动回退至运营方锁，彻底消除在用户地址沉淀闲置 CKB Dust 的坏账敞口。
-- *注：本阶段按计划聚焦单一会话基础流程调通，多用户 UTXO 预拆分与并发 hot-cell 锁暂缓至下一阶段。*
+- **并发开渠与 UTXO 冲突防护**：`ops/prep-gift-cells.mjs` 预拆 ~220 CKB 小 Cell；`POST /api/sign-funding` 基于 input outpoint 的 inflight 内存占用集合（5min TTL、409 拒签不消耗 signed）；前端 `useSwap` 撞锁整段重开（新 bootstrap + 重新开渠 + 重新签名，上限 5 次）。
+
 
 已验证：
 
-- `npm test`：91 个测试全部通过（42 api + 48 web + 1 contracts）。
+- `npm test`：145 个测试全部通过（65 api + 79 web + 1 contracts）。
 - `npm run typecheck`：contracts、api、web 静态类型检查全部通过。
 - `npm run build`：生产构建全部通过。
 

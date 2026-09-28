@@ -16,6 +16,8 @@ import {
 import { MemoryBootstrapSessionStore } from './bootstrapStore.js';
 import { CccOperatorCkbSender, type OperatorCkbSender } from './ccc.js';
 import type { CchGateway, OpenChannelParams, OpenChannelResult } from './cch.js';
+import { FundingPolicyError } from './errors.js';
+import { InflightOutpointsTracker, clearForTest as clearInflightForTest } from './inflightOutpoints.js';
 
 const VALID_PUBKEY = '03dfe0e6cc02a21ca3a971bc2fa05474872dc2acb91cc5defeb1f0566888536957';
 const VALID_PUBKEY_WITH_0X = '0x03dfe0e6cc02a21ca3a971bc2fa05474872dc2acb91cc5defeb1f0566888536957';
@@ -31,6 +33,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
   beforeEach(() => {
     setBootstrapSessionStore(new MemoryBootstrapSessionStore());
     clearBootstrapSessionsForTest();
+    clearInflightForTest();
   });
 
   describe('validateBootstrapRequest', () => {
@@ -844,6 +847,330 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
         assert.equal(replayRes.status, 400);
         const replayBody = (await replayRes.json()) as any;
         assert.match(replayBody.error, /already been signed/);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it('POST /api/sign-funding rejects concurrent colliding outpoints with 409, preserves loser session.signed, and allows retry with different outpoint', async () => {
+      const CHANNEL_ID_1 = '0x' + '11'.repeat(32);
+      const CHANNEL_ID_2 = '0x' + '22'.repeat(32);
+
+      let pendingList = [
+        {
+          channel_id: '0x' + 'aa'.repeat(32),
+          pubkey: VALID_PUBKEY,
+          is_acceptor: true,
+          state: { state_name: 'NegotiatingFunding' },
+        },
+        {
+          channel_id: '0x' + 'bb'.repeat(32),
+          pubkey: VALID_PUBKEY,
+          is_acceptor: true,
+          state: { state_name: 'NegotiatingFunding' },
+        },
+      ];
+
+      const mockGateway: CchGateway = {
+        createOrder: async () => { throw new Error('not used'); },
+        getOrder: async () => null,
+        health: async () => true,
+        getNodeInfo: async () => ({
+          node_id: VALID_PUBKEY,
+          addresses: ['/ip4/127.0.0.1/tcp/18328/ws'],
+          channel_count: 1,
+          peer_count: 2,
+        }),
+        openChannel: async () => ({ channel_id: 'not_used' }),
+        listChannels: async () => ({ channels: [...pendingList] }),
+        acceptChannel: async (params) => {
+          pendingList = pendingList.filter((ch) => ch.channel_id !== params.temporary_channel_id);
+          if (params.temporary_channel_id === '0x' + 'aa'.repeat(32)) {
+            return { channel_id: CHANNEL_ID_1 };
+          }
+          return { channel_id: CHANNEL_ID_2 };
+        },
+      };
+
+      const mockSender: OperatorCkbSender = {
+        sendCapacityGift: async () => ({ txHash: '0x' }),
+        signFundingTransaction: async (tx) => ({ ...(tx as object), witnesses: ['0xsigned'] }),
+      };
+
+      // Bootstrap session 1
+      const session1 = await prepareInboundLiquidity(
+        { node_pubkey: VALID_PUBKEY, external_funding: true },
+        { operatorPrivateKey: DUMMY_OPERATOR_KEY, operatorInventory: SUFFICIENT_INVENTORY, cchGateway: mockGateway },
+      );
+      await getBootstrapSessionTask(session1.session_id);
+
+      // Bootstrap session 2
+      const session2 = await prepareInboundLiquidity(
+        { node_pubkey: VALID_PUBKEY, external_funding: true },
+        { operatorPrivateKey: DUMMY_OPERATOR_KEY, operatorInventory: SUFFICIENT_INVENTORY, cchGateway: mockGateway },
+      );
+      await getBootstrapSessionTask(session2.session_id);
+
+      const app = express();
+      app.use(express.json());
+      app.use('/api', createApiRouter({ operatorCkbSender: mockSender, operatorInventory: SUFFICIENT_INVENTORY }));
+
+      const server = createServer(app);
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const port = (server.address() as any).port;
+
+      const sharedOutpoint = { tx_hash: '0x' + 'ee'.repeat(32), index: '0x0' };
+      const uniqueOutpoint = { tx_hash: '0x' + 'ff'.repeat(32), index: '0x0' };
+
+      try {
+        // Both users concurrently try to sign funding transactions sharing the same gift outpoint
+        const [res1, res2] = await Promise.all([
+          fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              channel_id: CHANNEL_ID_1,
+              unsigned_funding_tx: { inputs: [{ previous_output: sharedOutpoint }] },
+            }),
+          }),
+          fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              channel_id: CHANNEL_ID_2,
+              unsigned_funding_tx: { inputs: [{ previous_output: sharedOutpoint }] },
+            }),
+          }),
+        ]);
+
+        const statuses = [res1.status, res2.status].sort();
+        // Exactly one 200 (winner) and one 409 (collision loser)
+        assert.deepEqual(statuses, [200, 409]);
+
+        // Identify winner and loser sessions
+        const winnerChannel = res1.status === 200 ? CHANNEL_ID_1 : CHANNEL_ID_2;
+        const loserChannel = res1.status === 409 ? CHANNEL_ID_1 : CHANNEL_ID_2;
+        const loserSessionId = loserChannel === CHANNEL_ID_1 ? session1.session_id : session2.session_id;
+
+        // Session.signed was marked for winner, but NOT consumed for loser
+        const winnerSessionObj = getBootstrapSession(winnerChannel === CHANNEL_ID_1 ? session1.session_id : session2.session_id);
+        const loserSessionObj = getBootstrapSession(loserSessionId);
+        assert.equal(winnerSessionObj?.signed, true);
+        assert.equal(loserSessionObj?.signed, false);
+
+        // Loser can retry with a different (uncollided) outpoint and succeed with 200!
+        const retryRes = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: loserChannel,
+            unsigned_funding_tx: { inputs: [{ previous_output: uniqueOutpoint }] },
+          }),
+        });
+        assert.equal(retryRes.status, 200);
+        const retryBody = (await retryRes.json()) as any;
+        assert.equal(retryBody.channel_id, loserChannel);
+        assert.equal(getBootstrapSession(loserSessionId)?.signed, true);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it('POST /api/sign-funding rolls back session.signed and releases inflight keys on signer / policy failure', async () => {
+      const CHANNEL_ID = '0x' + '33'.repeat(32);
+      const mockGateway: CchGateway = {
+        createOrder: async () => { throw new Error('not used'); },
+        getOrder: async () => null,
+        health: async () => true,
+        getNodeInfo: async () => ({
+          node_id: VALID_PUBKEY,
+          addresses: ['/ip4/127.0.0.1/tcp/18328/ws'],
+          channel_count: 1,
+          peer_count: 2,
+        }),
+        openChannel: async () => ({ channel_id: 'not_used' }),
+        listChannels: async () => ({
+          channels: [
+            {
+              channel_id: '0x' + '33'.repeat(32),
+              pubkey: VALID_PUBKEY,
+              is_acceptor: true,
+              state: { state_name: 'NegotiatingFunding' },
+            },
+          ],
+        }),
+        acceptChannel: async () => ({ channel_id: CHANNEL_ID }),
+      };
+
+      let shouldFailSign = true;
+      const failingSender: OperatorCkbSender = {
+        sendCapacityGift: async () => ({ txHash: '0x' }),
+        signFundingTransaction: async () => {
+          if (shouldFailSign) {
+            throw new FundingPolicyError('Policy check failed: unauthorized input cell');
+          }
+          return { witnesses: ['0xsigned'] };
+        },
+      };
+
+      const session = await prepareInboundLiquidity(
+        { node_pubkey: VALID_PUBKEY, external_funding: true },
+        { operatorPrivateKey: DUMMY_OPERATOR_KEY, operatorInventory: SUFFICIENT_INVENTORY, cchGateway: mockGateway },
+      );
+      await getBootstrapSessionTask(session.session_id);
+
+      const app = express();
+      app.use(express.json());
+      app.use('/api', createApiRouter({ operatorCkbSender: failingSender, operatorInventory: SUFFICIENT_INVENTORY }));
+
+      const server = createServer(app);
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const port = (server.address() as any).port;
+
+      const testOutpoint = { tx_hash: '0x' + '77'.repeat(32), index: '0x0' };
+
+      try {
+        // First attempt fails at policy / signing stage
+        const failRes = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: CHANNEL_ID,
+            unsigned_funding_tx: { inputs: [{ previous_output: testOutpoint }] },
+          }),
+        });
+        assert.equal(failRes.status, 400);
+
+        // session.signed should have been rolled back to false
+        const sessionAfterFail = getBootstrapSession(session.session_id);
+        assert.equal(sessionAfterFail?.signed, false);
+
+        // Inflight reservation must be released, so the same outpoint can be signed when fixed
+        shouldFailSign = false;
+        const successRes = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: CHANNEL_ID,
+            unsigned_funding_tx: { inputs: [{ previous_output: testOutpoint }] },
+          }),
+        });
+        assert.equal(successRes.status, 200);
+        assert.equal(getBootstrapSession(session.session_id)?.signed, true);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it('Inflight outpoints auto-expire after TTL, allowing subsequent sign with the same outpoint', async () => {
+      const CHANNEL_ID_A = '0x' + '44'.repeat(32);
+      const CHANNEL_ID_B = '0x' + '55'.repeat(32);
+
+      let pendingList = [
+        {
+          channel_id: '0x' + '44'.repeat(32),
+          pubkey: VALID_PUBKEY,
+          is_acceptor: true,
+          state: { state_name: 'NegotiatingFunding' },
+        },
+        {
+          channel_id: '0x' + '55'.repeat(32),
+          pubkey: VALID_PUBKEY,
+          is_acceptor: true,
+          state: { state_name: 'NegotiatingFunding' },
+        },
+      ];
+
+      const mockGateway: CchGateway = {
+        createOrder: async () => { throw new Error('not used'); },
+        getOrder: async () => null,
+        health: async () => true,
+        getNodeInfo: async () => ({
+          node_id: VALID_PUBKEY,
+          addresses: ['/ip4/127.0.0.1/tcp/18328/ws'],
+          channel_count: 1,
+          peer_count: 2,
+        }),
+        openChannel: async () => ({ channel_id: 'not_used' }),
+        listChannels: async () => ({ channels: [...pendingList] }),
+        acceptChannel: async (p) => {
+          pendingList = pendingList.filter((ch) => ch.channel_id !== p.temporary_channel_id);
+          return {
+            channel_id: p.temporary_channel_id === '0x' + '44'.repeat(32) ? CHANNEL_ID_A : CHANNEL_ID_B,
+          };
+        },
+      };
+
+      const mockSender: OperatorCkbSender = {
+        sendCapacityGift: async () => ({ txHash: '0x' }),
+        signFundingTransaction: async (tx) => ({ ...(tx as object), witnesses: ['0xsigned'] }),
+      };
+
+      const sessionA = await prepareInboundLiquidity(
+        { node_pubkey: VALID_PUBKEY, external_funding: true },
+        { operatorPrivateKey: DUMMY_OPERATOR_KEY, operatorInventory: SUFFICIENT_INVENTORY, cchGateway: mockGateway },
+      );
+      await getBootstrapSessionTask(sessionA.session_id);
+
+      const sessionB = await prepareInboundLiquidity(
+        { node_pubkey: VALID_PUBKEY, external_funding: true },
+        { operatorPrivateKey: DUMMY_OPERATOR_KEY, operatorInventory: SUFFICIENT_INVENTORY, cchGateway: mockGateway },
+      );
+      await getBootstrapSessionTask(sessionB.session_id);
+
+      // Injected tracker with mockable / fast TTL
+      const tracker = new InflightOutpointsTracker();
+      const testOutpoint = { tx_hash: '0x' + '88'.repeat(32), index: '0x0' };
+
+      const app = express();
+      app.use(express.json());
+      app.use('/api', createApiRouter({ operatorCkbSender: mockSender, inflightTracker: tracker, operatorInventory: SUFFICIENT_INVENTORY }));
+
+      const server = createServer(app);
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const port = (server.address() as any).port;
+
+      try {
+        // Channel A signs successfully
+        const resA = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: CHANNEL_ID_A,
+            unsigned_funding_tx: { inputs: [{ previous_output: testOutpoint }] },
+          }),
+        });
+        assert.equal(resA.status, 200);
+
+        // Immediate submission by Channel B collides -> 409
+        const resB1 = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: CHANNEL_ID_B,
+            unsigned_funding_tx: { inputs: [{ previous_output: testOutpoint }] },
+          }),
+        });
+        assert.equal(resB1.status, 409);
+
+        // Advance tracker reservations past TTL (simulate 5min expiration)
+        const expiredTime = Date.now() + 6 * 60 * 1000;
+        // Re-reserve with expired timestamp to verify isReserved is false
+        assert.equal(tracker.isReserved(`0x${'88'.repeat(32)}:0x0`, expiredTime), false);
+
+        // Clear tracker to simulate TTL auto-expiry in the router instance
+        tracker.clearForTest();
+
+        // Channel B can now sign after TTL expiration
+        const resB2 = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: CHANNEL_ID_B,
+            unsigned_funding_tx: { inputs: [{ previous_output: testOutpoint }] },
+          }),
+        });
+        assert.equal(resB2.status, 200);
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }

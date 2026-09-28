@@ -19,6 +19,15 @@ export class ApiError extends Error {
   }
 }
 
+export function isFundingInflightCollision(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  if ('status' in err && (err as { status: unknown }).status === 409) return true;
+  // Real 409 bodies say "in flight"; do not match a bare "409" substring
+  // (channel_id hex can contain it) or unrelated "collision" text.
+  const msg = err instanceof Error ? err.message : '';
+  return msg.toLowerCase().includes('in flight');
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
