@@ -60,7 +60,7 @@ npm install
 
 The browser starts a passkey-backed Fiber WASM node on CKB testnet, uses testnet cWBTC, and creates `Fibt` invoices. `npm run dev` does not start or fund the testnet operator. The operator still needs CKB capacity, cWBTC liquidity, reachable FNN/CCH RPC, and a reachable P2P address.
 
-Vite supplies the COOP/COEP headers required by Fiber WASM and proxies the public CKB RPC through the same origin. Use the Vite URL while developing; opening built files directly or serving them without those headers will break `SharedArrayBuffer` and WASM startup.
+The development server and production preview supply the COOP/COEP and CSP headers required by Fiber WASM, and proxy the API and public CKB RPC through the same origin. Use the Vite URL while developing; opening built files directly or serving them without those headers will break `SharedArrayBuffer` and WASM startup.
 
 ## Path 2: run the local protocol stack
 
@@ -86,6 +86,8 @@ npm run stack:down
 | `OPERATOR_CKB_PRIVATE_KEY` | Testnet operator's 32-byte hex signing key. Required for website liquidity provisioning; never commit it. The local ops harness uses generated devnet keys instead. |
 
 Other defaults are listed in [.env.example](.env.example). `ops/stack.sh` writes a gitignored `ops/runtime.env` and, only when `.env` does not already exist, copies it to `.env`. That generated file is for local stack endpoints; replace it with testnet operator settings before returning to the website path.
+
+`VITE_API_BASE_URL` defaults to the same-origin `/api` path. Production hosting must route that path to the API rather than configuring a cross-origin browser endpoint that CSP will reject.
 
 ## Common failures
 
