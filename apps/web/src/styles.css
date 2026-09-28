@@ -23,7 +23,7 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-button, input {
+button, input, textarea {
   font: inherit;
 }
 
@@ -31,7 +31,7 @@ button, a {
   -webkit-tap-highlight-color: transparent;
 }
 
-button:focus-visible, a:focus-visible, input:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
@@ -1685,6 +1685,50 @@ button:focus-visible, a:focus-visible, input:focus-visible {
   gap: 0.35rem;
 }
 
+.account-dialog {
+  max-width: 42rem;
+}
+
+.account-exits {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.fiber-invoice-label {
+  font-size: 0.6875rem;
+  color: var(--color-muted);
+}
+
+.fiber-invoice-input {
+  width: 100%;
+  min-height: 4.75rem;
+  resize: vertical;
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  line-height: 1.4;
+  padding: 0.5rem 0.6rem;
+}
+
+.fiber-invoice-input:disabled {
+  opacity: 0.6;
+}
+
+.fiber-spend-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.fiber-spend-preview .card-balance-number {
+  font-size: 1.15rem;
+}
+
 /* Button & Utility */
 .button {
   max-width: 100%;
@@ -1780,6 +1824,12 @@ button:focus-visible, a:focus-visible, input:focus-visible {
 }
 
 /* Responsive queries */
+@media (max-width: 40rem) {
+  .account-exits {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 32rem) {
   .hero-headline {
     font-size: 1.85rem;
