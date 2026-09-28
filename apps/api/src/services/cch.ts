@@ -79,8 +79,17 @@ export interface CchGateway {
 }
 const extractLightningInvoice = (value: ReceiveBtcResult['incoming_invoice']): string => {
   if (typeof value === 'string') return value;
-  if (!value.Lightning) throw new Error('CCH did not return a Lightning invoice');
+  if (!value || typeof value !== 'object' || !value.Lightning) throw new Error('CCH did not return a Lightning invoice');
   return value.Lightning;
+};
+const extractLightningInvoiceSafe = (
+  value: ReceiveBtcResult['incoming_invoice'] | undefined,
+  fallback?: string,
+): string => {
+  if (typeof value === 'string' && value) return value;
+  if (value && typeof value === 'object' && value.Lightning) return value.Lightning;
+  if (fallback) return fallback;
+  return '';
 };
 const parseRpcAmount = (value: string | undefined, fallback: number): number => {
   if (!value) return fallback;
@@ -195,10 +204,10 @@ export class RpcCchGateway implements CchGateway {
     const paySats = parseRpcAmount(result.amount_sats, local?.pay_sats ?? 0);
     const feeSats = parseRpcAmount(result.fee_sats, local?.fee_sats ?? 0);
     const order: SwapOrder = {
-      order_id: result.payment_hash,
-      payment_hash: result.payment_hash,
+      order_id: result.payment_hash || paymentHash,
+      payment_hash: result.payment_hash || paymentHash,
       status: result.status ?? local?.status ?? 'Pending',
-      lightning_invoice: extractLightningInvoice(result.incoming_invoice),
+      lightning_invoice: extractLightningInvoiceSafe(result.incoming_invoice, local?.lightning_invoice),
       fiber_invoice: result.outgoing_pay_req ?? local?.fiber_invoice ?? '',
       receive_raw: String(Math.max(0, paySats - feeSats)),
       pay_sats: paySats,
