@@ -1038,6 +1038,7 @@ export function useSwap() {
     resetSwap,
     refreshBalance,
     connectNode,
+    ensureNodeRunning,
     viewReceipt,
     fiber,
   };
