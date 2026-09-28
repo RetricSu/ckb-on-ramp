@@ -11,6 +11,8 @@
     "vendor:fiber": "mkdir -p public/vendor && esbuild node_modules/@nervosnetwork/fiber-js/dist/index.js --bundle --format=esm --platform=browser --minify --target=esnext --outfile=public/vendor/fiber-js.js"
   },
   "dependencies": {
+    "@ckb-ccc/core": "^1.21.0",
+    "@ckb-ccc/uni-sat": "^1.0.32",
     "@ckb-on-ramp/contracts": "0.1.0",
     "@fiber-pay/react": "0.3.2",
     "@fontsource/ibm-plex-sans": "5.3.0",
