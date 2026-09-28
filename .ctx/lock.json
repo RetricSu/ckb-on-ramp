@@ -8,7 +8,7 @@
       "anchors": {
         "file:apps/api/src/services/fundingPolicy.ts": "sha256:5e2e87c8f392a4f66d4f249194e37731caba686e43cc73d2035fe77c696a08b4",
         "file:apps/web/src/channels.ts": "sha256:513ccb71ffdf356202cd59ca85606a6b04575af15e4c385151b4733e652cd4b3",
-        "file:apps/web/src/useSwap.ts": "sha256:91ae0ebfe57782107911a73e68c96c89e0806b19f4e29260d725f0f2e0470cf6"
+        "file:apps/web/src/useSwap.ts": "sha256:95aab6df3e6d4b6cde91e261d97a656daac9843772f576a4d3d4e5bc50d73aea"
       },
       "dependencies": {}
     }

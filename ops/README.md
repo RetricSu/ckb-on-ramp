@@ -142,3 +142,9 @@ npm run stack:up
 ```
 
 `offckb clean` deletes the offckb local chain; it does not touch this repository.
+
+## Receive availability checks
+
+Before opening or signing a new channel, the API verifies the operator gift-lock CKB and the FNN funding-lock CKB/cWBTC live cells. A missing inventory reader, an unavailable FNN funding lock, insufficient CKB, insufficient cWBTC, or the absence of an exact-sized cWBTC input cell makes `/api/health` and `/api/node-info` report `can_receive: false`; bootstrap/sign-funding then reject before creating a partially funded channel.
+
+The current FNN/CCH RPC surface does not expose a reliable CCH LND inbound-liquidity balance, so LND-side inbound capacity is **not checked** here. This is an explicit remaining risk rather than a readiness signal inferred from node health.

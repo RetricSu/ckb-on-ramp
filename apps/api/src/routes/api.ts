@@ -12,17 +12,35 @@ import { CchRpcError, cchGateway as defaultCchGateway, type CchGateway } from '.
 import { FundingPolicyError } from '../services/errors.js';
 import { getOperatorSigner } from '../services/operatorSigner.js';
 import { createQuote } from '../services/quote.js';
+import {
+  assertWithinFundingLimit,
+  getReceiveReadiness,
+  type OperatorInventory,
+} from '../services/fundingAvailability.js';
 
 export interface ApiRouterDependencies {
   cchGateway?: CchGateway;
   prepareInboundLiquidity?: typeof prepareInboundLiquidity;
   operatorCkbSender?: OperatorCkbSender;
+  operatorInventory?: OperatorInventory;
 }
 
 export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
   const router = Router();
   const gateway = deps.cchGateway ?? defaultCchGateway;
   const prepLiquidity = deps.prepareInboundLiquidity ?? prepareInboundLiquidity;
+  const checkReceiveReadiness = async (fundingAmount?: string) => {
+    try {
+      return await getReceiveReadiness({
+        gateway,
+        sender: deps.operatorCkbSender ?? getOperatorSigner(),
+        fundingAmount,
+        inventory: deps.operatorInventory,
+      });
+    } catch (error) {
+      return { canReceive: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+  };
 
   const quotes = new Map<string, Quote>();
   const idempotency = new Map<string, { paymentHash: string; fingerprint: string; createdAt: number }>();
@@ -39,13 +57,23 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
 
   router.get('/health', async (_req, res) => {
     const fnnReachable = await gateway.health();
-    res.json({ ok: fnnReachable, mode: 'testnet', fnn_reachable: fnnReachable });
+    const readiness = fnnReachable
+      ? await checkReceiveReadiness()
+      : { canReceive: false, reason: 'FNN is unreachable' };
+    res.json({
+      ok: fnnReachable,
+      mode: 'testnet',
+      fnn_reachable: fnnReachable,
+      can_receive: readiness.canReceive,
+      unavailable_reason: readiness.reason,
+    });
   });
 
   router.get('/node-info', async (_req, res, next) => {
     try {
       const info = await gateway.getNodeInfo();
-      res.json(info);
+      const readiness = await checkReceiveReadiness();
+      res.json({ ...info, can_receive: readiness.canReceive, unavailable_reason: readiness.reason });
     } catch (error) {
       if (error instanceof CchRpcError) {
         res.status(502).json({ error: error.message, upstream: true });
@@ -77,7 +105,12 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
         funding_address: req.body?.funding_address ? String(req.body.funding_address) : undefined,
         external_funding: req.body?.external_funding === true,
       });
-      res.status(session.status === 'failed' ? 501 : 201).json(session);
+      const status = session.status !== 'failed'
+        ? 201
+        : session.failure_code === 'not_configured'
+          ? 501
+          : 503;
+      res.status(status).json(session);
     } catch (error) {
       if (error instanceof CchRpcError) {
         res.status(502).json({ error: error.message, upstream: true });
@@ -127,11 +160,26 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
         res.status(400).json({ error: `Bootstrap session for channel (${channelId}) is missing negotiated funding amount` });
         return;
       }
+      assertWithinFundingLimit(BigInt(session.funding_amount));
 
       const sender = deps.operatorCkbSender ?? getOperatorSigner();
       if (!sender?.signFundingTransaction) {
         res.status(501).json({
           error: 'Operator external funding signer is not configured (OPERATOR_CKB_PRIVATE_KEY is unset)',
+        });
+        return;
+      }
+
+      const readiness = await getReceiveReadiness({
+        gateway,
+        sender,
+        fundingAmount: session.funding_amount,
+        externalFunding: true,
+        inventory: deps.operatorInventory,
+      });
+      if (!readiness.canReceive) {
+        res.status(503).json({
+          error: `Operator cannot fund this channel: ${readiness.reason ?? 'inventory is unavailable'}`,
         });
         return;
       }
@@ -166,6 +214,10 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
         return;
       }
       const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('operator channel funding limit') || msg.includes('Funding amount must be positive')) {
+        res.status(400).json({ error: msg });
+        return;
+      }
       res.status(500).json({ error: msg });
     }
   });
@@ -195,11 +247,17 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
       } else if (replay) idempotency.delete(key);
       const quote = quotes.get(input.quote_id);
       if (!quote || Date.parse(quote.expires_at) <= Date.now()) { res.status(410).json({ error: 'Quote is missing or expired. Request a new quote.' }); return; }
+      assertWithinFundingLimit(BigInt(quote.receive_raw));
       const order = await gateway.createOrder(input as CreateOrderRequest, quote);
       trimOldest(idempotency);
       idempotency.set(key, { paymentHash: order.payment_hash, fingerprint, createdAt: Date.now() }); res.status(201).json(order);
     } catch (error) {
       if (error instanceof CchRpcError) { res.status(400).json({ error: error.message, upstream: true }); return; }
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('operator channel funding limit') || msg.includes('Funding amount must be positive')) {
+        res.status(400).json({ error: msg });
+        return;
+      }
       next(error);
     }
   });

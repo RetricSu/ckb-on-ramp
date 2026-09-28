@@ -7,6 +7,11 @@ import { cchGateway, type CchGateway } from './cch.js';
 import { redactSecret } from '../utils/redact.js';
 import { getOperatorSigner } from './operatorSigner.js';
 import {
+  assertWithinFundingLimit,
+  getReceiveReadiness,
+  type OperatorInventory,
+} from './fundingAvailability.js';
+import {
   FileBootstrapSessionStore,
   type BootstrapSessionStore,
 } from './bootstrapStore.js';
@@ -113,6 +118,7 @@ export interface BootstrapDependencies {
   ckbRpcUrl?: string;
   channelFundingAmount?: string;
   skipCapacityGift?: boolean;
+  operatorInventory?: OperatorInventory;
 }
 
 export async function prepareInboundLiquidity(
@@ -130,6 +136,7 @@ export async function prepareInboundLiquidity(
     return {
       session_id: randomUUID(),
       status: 'failed',
+      failure_code: 'not_configured',
       message,
     };
   }
@@ -137,8 +144,27 @@ export async function prepareInboundLiquidity(
   try {
     const gateway = dependencies?.cchGateway ?? cchGateway;
     const rawFundingAmount = dependencies?.channelFundingAmount ?? config.operatorChannelFundingAmount;
-    const fundingAmountHex = '0x' + BigInt(rawFundingAmount).toString(16);
+    const fundingAmount = BigInt(rawFundingAmount);
+    assertWithinFundingLimit(fundingAmount);
+    const fundingAmountHex = '0x' + fundingAmount.toString(16);
     const pubkey = validated.node_pubkey.replace(/^0x/, '');
+
+    const sender = dependencies?.operatorCkbSender ?? getOperatorSigner();
+    const readiness = await getReceiveReadiness({
+      gateway,
+      sender,
+      fundingAmount: rawFundingAmount,
+      externalFunding: validated.external_funding === true,
+      inventory: dependencies?.operatorInventory,
+    });
+    if (!readiness.canReceive) {
+      return {
+        session_id: randomUUID(),
+        status: 'failed',
+        failure_code: 'operator_inventory_insufficient',
+        message: `Operator cannot open a new inbound channel: ${readiness.reason ?? 'inventory is unavailable'}`,
+      };
+    }
 
     // 2. Fetch peer address best-effort
     let peerAddress: string | undefined;
@@ -253,7 +279,7 @@ export async function prepareInboundLiquidity(
       return { ...session };
     }
 
-    const sender = skipCapacityGift
+    const giftSender = skipCapacityGift
       ? undefined
       : dependencies?.operatorCkbSender ??
         (dependencies?.operatorPrivateKey
@@ -261,7 +287,7 @@ export async function prepareInboundLiquidity(
           : getOperatorSigner());
 
     // 1. Submit ≥200 CKB capacity gift unless local e2e skips it (offckb accounts are pre-funded).
-    const giftResult = sender ? await sender.sendCapacityGift(validated.funding_address!, 200) : undefined;
+    const giftResult = giftSender ? await giftSender.sendCapacityGift(validated.funding_address!, 200) : undefined;
 
     // 3. Create in-memory session with gift tx hash and provisioning_liquidity status
     const sessionId = randomUUID();
@@ -280,8 +306,8 @@ export async function prepareInboundLiquidity(
     // 4. Background task: waitTransaction → FNN open_channel → update session (channel_id)
     const task = (async () => {
       try {
-        if (sender?.waitForTransaction && giftResult?.txHash) {
-          await sender.waitForTransaction(giftResult.txHash);
+        if (giftSender?.waitForTransaction && giftResult?.txHash) {
+          await giftSender.waitForTransaction(giftResult.txHash);
         }
         const openResult = await gateway.openChannel({
           pubkey,

@@ -149,6 +149,10 @@ describe('Bootstrap Session Persistence and Recovery', () => {
     const router = createApiRouter({
       cchGateway: fakeGateway,
       operatorCkbSender: fakeSender,
+      operatorInventory: {
+        giftCapacityShannons: 300n * 100_000_000n,
+        fnnCwbtcCells: [{ capacityShannons: 200n * 100_000_000n, amount: 100_000_000n }],
+      },
     });
 
     // Simulate POST /api/sign-funding request directly via express route handler or mock req/res
