@@ -85,10 +85,10 @@ export function SettlementModal({ swap }: SettlementModalProps) {
         <div className="modal-header">
           <div className="modal-title-group">
             <h3 id="modal-title" className="modal-title">
-              {isSuccess ? 'Swap Settled' : 'Pay with Lightning'}
+              {isSuccess ? 'Swap Settled' : 'Pay with a Lightning wallet'}
             </h3>
             <span className="modal-kicker">
-              {isSuccess ? 'OFF-CHAIN ASSET RECEIVED' : 'CROSS-CHAIN SETTLEMENT'}
+              {isSuccess ? 'OFF-CHAIN ASSET RECEIVED' : 'BOLT11 INVOICE'}
             </span>
           </div>
 
@@ -221,11 +221,16 @@ export function SettlementModal({ swap }: SettlementModalProps) {
               </span>
             </div>
 
+            <p className="payment-instructions">
+              Scan this invoice with Phoenix, Zeus, Blink, Cash App, or any wallet that pays
+              BOLT11 invoices.
+            </p>
+
             {/* QR Code */}
             <div
               className="qr-wrapper"
               onClick={() => void copyText(order.lightning_invoice, setCopiedInvoice)}
-              title="Click QR Code to copy invoice"
+              title="Click QR code to copy BOLT11 invoice"
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {
@@ -242,7 +247,7 @@ export function SettlementModal({ swap }: SettlementModalProps) {
                 </div>
               )}
               <span className="qr-tap-hint">
-                {copiedInvoice ? '✓ Copied Invoice!' : 'Click QR to copy invoice'}
+                {copiedInvoice ? '✓ Invoice copied!' : 'Tap or click QR to copy invoice'}
               </span>
             </div>
 
@@ -284,10 +289,15 @@ export function SettlementModal({ swap }: SettlementModalProps) {
                   rel="noreferrer"
                 >
                   <ExternalLinkIcon width="14" height="14" />
-                  <span>Open in Wallet</span>
+                  <span>Open Wallet</span>
                 </a>
               </div>
             </div>
+
+            <p className="wallet-requirement-note">
+              <strong>On-chain BTC cannot pay this invoice.</strong> No Lightning wallet? Use
+              Phoenix or a similar wallet to move BTC to Lightning, then return and scan.
+            </p>
 
             {/* Geek / lncli CLI command drawer */}
             <div className="geek-drawer">
@@ -297,7 +307,7 @@ export function SettlementModal({ swap }: SettlementModalProps) {
                 onClick={() => setGeekExpanded((prev) => !prev)}
                 aria-expanded={geekExpanded}
               >
-                <span>Terminal lncli command</span>
+                <span>Advanced: pay from a node</span>
                 <span className={`geek-chevron ${geekExpanded ? 'expanded' : ''}`}>
                   <ChevronDownIcon width="14" height="14" />
                 </span>
@@ -330,8 +340,7 @@ export function SettlementModal({ swap }: SettlementModalProps) {
             </div>
 
             <p className="settlement-footnote">
-              Pay from Phoenix, Zeus, LND, CashApp, Blink, or any Lightning wallet. Keep this tab
-              open until settlement is confirmed.
+              Keep this tab open until your wallet payment is confirmed.
             </p>
           </div>
         )}

@@ -56,11 +56,13 @@ function SwapApp() {
 
       <footer className="app-footer">
         <div className="footer-content">
-          <p>CKB On-ramp · Powered by Fiber Network & Lightning CCH · Testnet Edition</p>
+          <p>Pay the BOLT11 invoice with your own Lightning wallet.</p>
           <div className="footer-links">
             <span>Non-custodial</span>
             <span>·</span>
-            <span>No seed phrase export needed</span>
+            <span>Powered by Fiber Network &amp; Lightning CCH</span>
+            <span>·</span>
+            <span>Testnet Edition</span>
           </div>
         </div>
       </footer>
