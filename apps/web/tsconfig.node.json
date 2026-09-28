@@ -6,5 +6,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "src/vite-plugin-cross-origin-isolation.d.ts"]
+  "include": ["vite.config.ts"]
 }

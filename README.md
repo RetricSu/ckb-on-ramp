@@ -34,7 +34,7 @@ npm run stack:e2e
 - Web: `http://localhost:5173`
 - API: `http://localhost:3001`
 
-The development server and production preview set the COOP/COEP headers required by Fiber WASM.
+The development server and production preview set the COOP/COEP and CSP headers required by Fiber WASM.
 
 ## Verify
 
@@ -55,7 +55,7 @@ Copy `.env.example` to `.env` to override defaults.
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowed web origin |
 | `CCH_BASE_FEE_SATS` | `100` | Quote base fee; must match FNN |
 | `CCH_FEE_RATE_PPM` | `3000` | Quote proportional fee; must match FNN |
-| `VITE_API_BASE_URL` | `http://localhost:3001/api` | Browser API base URL |
+| `VITE_API_BASE_URL` | `/api` | Same-origin browser API base path |
 | `OPERATOR_CKB_PRIVATE_KEY` | _(none)_ | 32-byte hex private key for operator CKB capacity gifts |
 | `CKB_RPC_URL` | `https://testnet.ckb.dev/rpc` | CKB node RPC URL |
 | `OPERATOR_CHANNEL_FUNDING_AMOUNT` | `100000000` | cWBTC channel funding amount in raw units |
