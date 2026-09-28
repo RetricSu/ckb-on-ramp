@@ -7,6 +7,7 @@ import {
   fixedPointFrom,
 } from '@ckb-ccc/core';
 import {
+  CWBTC_SCRIPT,
   type CkbScript,
   normalizeCkbTransactionForCcc,
   normalizeCkbTransactionForRpc,
@@ -15,12 +16,14 @@ import { redactSecret } from '../utils/redact.js';
 import { FundingPolicyError } from './errors.js';
 import {
   assertFundingTxPolicy,
+  parseU128Le,
   type CkbScriptLike,
   DEFAULT_ALLOWED_FUNDING_LOCK_CODE_HASHES,
   MAX_ALLOWED_FEE_SHANNONS,
   MAX_FUNDING_CELL_CAPACITY_SHANNONS,
   MAX_TOTAL_INPUT_CAPACITY_SHANNONS,
 } from './fundingPolicy.js';
+import type { OperatorInventory } from './fundingAvailability.js';
 
 export {
   DEFAULT_ALLOWED_FUNDING_LOCK_CODE_HASHES,
@@ -44,6 +47,7 @@ export interface OperatorCkbSender {
   waitForTransaction?(txHash: string): Promise<void>;
   getFundingLockScript?(): Promise<CkbScript>;
   signFundingTransaction?(unsignedTx: unknown, options?: SignFundingOptions): Promise<unknown>;
+  getInventory?(fnnFundingLock: CkbScript): Promise<OperatorInventory>;
 }
 
 export class CccOperatorCkbSender implements OperatorCkbSender {
@@ -89,6 +93,34 @@ export class CccOperatorCkbSender implements OperatorCkbSender {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`Failed to get operator funding lock script: ${this.redactKey(msg)}`);
+    }
+  }
+
+  async getInventory(fnnFundingLock: CkbScript): Promise<OperatorInventory> {
+    try {
+      const operatorLock = (await this.signer.getRecommendedAddressObj()).script;
+      const giftCapacityShannons = await this.client.getBalanceSingle(operatorLock);
+      const fnnCwbtcCells: OperatorInventory['fnnCwbtcCells'] = [];
+      const fnnLock = {
+        codeHash: fnnFundingLock.code_hash,
+        hashType: fnnFundingLock.hash_type,
+        args: fnnFundingLock.args,
+      };
+      const cwbtcType = {
+        codeHash: CWBTC_SCRIPT.code_hash,
+        hashType: CWBTC_SCRIPT.hash_type,
+        args: CWBTC_SCRIPT.args,
+      };
+      for await (const cell of this.client.findCellsByLock(fnnLock, cwbtcType, true)) {
+        const amount = parseU128Le(cell.outputData);
+        if (amount !== null) {
+          fnnCwbtcCells.push({ capacityShannons: cell.cellOutput.capacity, amount });
+        }
+      }
+      return { giftCapacityShannons, fnnCwbtcCells };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to read operator inventory: ${this.redactKey(msg)}`);
     }
   }
 

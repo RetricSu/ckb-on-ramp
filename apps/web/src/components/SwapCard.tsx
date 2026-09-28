@@ -31,6 +31,7 @@ export function SwapCard({ swap }: SwapCardProps) {
     quote,
     isQuoting,
     quoteError,
+    health,
     step,
     cwbtcBalance,
     initiateSwap,
@@ -64,6 +65,9 @@ export function SwapCard({ swap }: SwapCardProps) {
     isButtonDisabled = true;
   } else if (isQuoting && !quote) {
     buttonText = 'Calculating quote…';
+    isButtonDisabled = true;
+  } else if (health?.can_receive === false) {
+    buttonText = 'Receiving temporarily unavailable';
     isButtonDisabled = true;
   }
 
@@ -303,6 +307,11 @@ export function SwapCard({ swap }: SwapCardProps) {
           )}
         </div>
 
+        {health?.can_receive === false && (
+          <div className="quote-error-banner">
+            {health.unavailable_reason ?? 'The operator cannot open a new inbound channel right now.'}
+          </div>
+        )}
         {quoteError && <div className="quote-error-banner">{quoteError}</div>}
 
         {/* Primary Action Button */}

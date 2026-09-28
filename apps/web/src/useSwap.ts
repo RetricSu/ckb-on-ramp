@@ -363,6 +363,10 @@ export function useSwap() {
 
   // Main Swap execution pipeline
   const initiateSwap = useCallback(async () => {
+    if (health?.can_receive === false) {
+      setError(health.unavailable_reason ?? 'The operator cannot receive new swaps right now.');
+      return;
+    }
     if (!parsedTarget.raw) {
       setError('Please enter a valid amount.');
       return;
@@ -623,7 +627,7 @@ export function useSwap() {
         setError(msg);
       }
     }
-  }, [parsedTarget.raw, ensureNodeRunning, health?.mode]);
+  }, [parsedTarget.raw, ensureNodeRunning, health?.mode, health?.can_receive, health?.unavailable_reason]);
 
   const resetSwap = useCallback(() => {
     setOrder(null);

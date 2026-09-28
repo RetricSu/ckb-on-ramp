@@ -20,6 +20,10 @@ const VALID_PUBKEY_WITH_0X = '0x03dfe0e6cc02a21ca3a971bc2fa05474872dc2acb91cc5de
 const VALID_TESTNET_ADDRESS = 'ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq05hurcuuzeudh8ldfcxp48jfj2efakgkqz78dss';
 const MAINNET_ADDRESS = 'ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq05hurcuuzeudh8ldfcxp48jfj2efakgkqz78dss';
 const DUMMY_OPERATOR_KEY = '0x' + '1234567890abcdef'.repeat(4);
+const SUFFICIENT_INVENTORY = {
+  giftCapacityShannons: 300n * 100_000_000n,
+  fnnCwbtcCells: [{ capacityShannons: 200n * 100_000_000n, amount: 100_000_000n }],
+};
 
 describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
   beforeEach(() => {
@@ -117,6 +121,67 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
       assert.match(session.message, /not wired/i);
     });
 
+    it('fails closed before sending a gift when operator inventory is insufficient', async () => {
+      let giftCalled = false;
+      const session = await prepareInboundLiquidity(
+        { node_pubkey: VALID_PUBKEY, funding_address: VALID_TESTNET_ADDRESS },
+        {
+          operatorPrivateKey: DUMMY_OPERATOR_KEY,
+          operatorCkbSender: {
+            sendCapacityGift: async () => {
+              giftCalled = true;
+              return { txHash: '0x' + 'aa'.repeat(32) };
+            },
+          },
+          operatorInventory: {
+            giftCapacityShannons: 100n,
+            fnnCwbtcCells: [],
+          },
+          cchGateway: {
+            createOrder: async () => { throw new Error('not used'); },
+            getOrder: async () => null,
+            health: async () => true,
+            getNodeInfo: async () => ({ node_id: VALID_PUBKEY, addresses: [], channel_count: 0, peer_count: 0 }),
+            openChannel: async () => { throw new Error('must not open'); },
+          },
+        },
+      );
+
+      assert.equal(session.status, 'failed');
+      assert.equal(session.failure_code, 'operator_inventory_insufficient');
+      assert.match(session.message, /inventory is insufficient/i);
+      assert.equal(giftCalled, false);
+    });
+
+    it('fails closed before opening a channel when FNN cWBTC inventory is insufficient', async () => {
+      let openCalled = false;
+      const session = await prepareInboundLiquidity(
+        { node_pubkey: VALID_PUBKEY, external_funding: true },
+        {
+          operatorPrivateKey: DUMMY_OPERATOR_KEY,
+          operatorInventory: {
+            giftCapacityShannons: 300n * 100_000_000n,
+            fnnCwbtcCells: [{ capacityShannons: 200n * 100_000_000n, amount: 99_999_999n }],
+          },
+          cchGateway: {
+            createOrder: async () => { throw new Error('not used'); },
+            getOrder: async () => null,
+            health: async () => true,
+            getNodeInfo: async () => ({ node_id: VALID_PUBKEY, addresses: [], channel_count: 0, peer_count: 0 }),
+            openChannel: async () => {
+              openCalled = true;
+              return { channel_id: 'must-not-open' };
+            },
+          },
+        },
+      );
+
+      assert.equal(session.status, 'failed');
+      assert.match(session.message, /FNN cWBTC inventory is insufficient/);
+      assert.equal(openCalled, false);
+      assert.equal(getBootstrapSessionTask(session.session_id), undefined);
+    });
+
     it('submits ≥200 CKB capacity gift without waiting for tx, returning provisioning_liquidity immediately', async () => {
       const giftCalls: { address: string; amount?: number | bigint }[] = [];
       const openChannelCalls: OpenChannelParams[] = [];
@@ -151,6 +216,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
         },
         {
           operatorPrivateKey: DUMMY_OPERATOR_KEY,
+          operatorInventory: SUFFICIENT_INVENTORY,
           operatorCkbSender: mockSender,
           cchGateway: mockGateway,
           channelFundingAmount: '100000000',
@@ -230,6 +296,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
         { node_pubkey: VALID_PUBKEY, funding_address: VALID_TESTNET_ADDRESS },
         {
           operatorPrivateKey: DUMMY_OPERATOR_KEY,
+          operatorInventory: SUFFICIENT_INVENTORY,
           operatorCkbSender: mockSender,
           cchGateway: mockGateway,
         },
@@ -276,6 +343,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
             },
             {
               operatorPrivateKey: DUMMY_OPERATOR_KEY,
+              operatorInventory: SUFFICIENT_INVENTORY,
               operatorCkbSender: mockFailingSender,
             },
           ),
@@ -305,6 +373,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
         { node_pubkey: VALID_PUBKEY, funding_address: VALID_TESTNET_ADDRESS },
         {
           operatorPrivateKey: DUMMY_OPERATOR_KEY,
+          operatorInventory: SUFFICIENT_INVENTORY,
           operatorCkbSender: mockSender,
           cchGateway: mockFailingGateway,
         },
@@ -529,6 +598,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
       const customPrep = (req: BootstrapRequest) =>
         prepareInboundLiquidity(req, {
           operatorPrivateKey: DUMMY_OPERATOR_KEY,
+          operatorInventory: SUFFICIENT_INVENTORY,
           operatorCkbSender: mockSender,
           cchGateway: mockGateway,
         });
@@ -647,6 +717,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
         },
         {
           operatorPrivateKey: DUMMY_OPERATOR_KEY,
+          operatorInventory: SUFFICIENT_INVENTORY,
           cchGateway: mockGateway,
         },
       );
@@ -701,14 +772,14 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
       // Create and accept real session
       const session = await prepareInboundLiquidity(
         { node_pubkey: VALID_PUBKEY, external_funding: true },
-        { operatorPrivateKey: DUMMY_OPERATOR_KEY, cchGateway: mockGateway },
+        { operatorPrivateKey: DUMMY_OPERATOR_KEY, operatorInventory: SUFFICIENT_INVENTORY, cchGateway: mockGateway },
       );
       await getBootstrapSessionTask(session.session_id);
 
       const app = express();
       app.use(express.json());
       // Real session check enabled (skipSessionCheck is false by default)
-      app.use('/api', createApiRouter({ operatorCkbSender: mockSender }));
+      app.use('/api', createApiRouter({ operatorCkbSender: mockSender, operatorInventory: SUFFICIENT_INVENTORY }));
 
       const server = createServer(app);
       await new Promise<void>((resolve) => server.listen(0, resolve));

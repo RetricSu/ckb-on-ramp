@@ -16,6 +16,7 @@ export interface BootstrapSession {
   funding_amount?: string;
   expires_at?: number;
   signed?: boolean;
+  failure_code?: 'not_configured' | 'operator_inventory_insufficient';
 }
 export interface QuoteRequest { receive_raw: string; }
 export interface Quote {
@@ -39,7 +40,13 @@ export interface SwapOrder {
   created_at: string;
   failure_reason?: string;
 }
-export interface HealthResponse { ok: boolean; mode: Environment; fnn_reachable: boolean; }
+export interface HealthResponse {
+  ok: boolean;
+  mode: Environment;
+  fnn_reachable: boolean;
+  can_receive: boolean;
+  unavailable_reason?: string;
+}
 export interface CkbScript {
   code_hash: string;
   hash_type: 'type' | 'data' | 'data1' | 'data2';
@@ -52,6 +59,8 @@ export interface NodeInfo {
   peer_count: number;
   funding_lock_script?: CkbScript;
   operator_channel_funding_amount?: string;
+  can_receive?: boolean;
+  unavailable_reason?: string;
 }
 export interface SignFundingRequest {
   channel_id: string;
@@ -123,4 +132,3 @@ export function normalizeCkbTransactionForCcc(value: unknown): unknown {
 export function normalizeCkbTransactionForRpc(value: unknown): unknown {
   return normalizeCkbTransactionByDirection(value, 'to-snake');
 }
-

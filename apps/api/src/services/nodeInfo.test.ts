@@ -219,7 +219,10 @@ describe('NodeInfo Service and Route', () => {
     it('returns HTTP 200 and NodeInfo DTO with injected test gateway', async () => {
       const app = express();
       app.use(express.json());
-      app.use('/api', createApiRouter({ cchGateway: new MockCchGateway() }));
+      app.use('/api', createApiRouter({
+        cchGateway: new MockCchGateway(),
+        operatorInventory: { giftCapacityShannons: 0n, fnnCwbtcCells: [] },
+      }));
 
       const server = createServer(app);
       await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -243,6 +246,12 @@ describe('NodeInfo Service and Route', () => {
         assert.ok(body.addresses.some((addr) => addr.includes('/wss')));
         assert.equal(typeof body.channel_count, 'number');
         assert.equal(typeof body.peer_count, 'number');
+
+        const healthRes = await fetch(`http://127.0.0.1:${port}/api/health`);
+        assert.equal(healthRes.status, 200);
+        const health = (await healthRes.json()) as { can_receive: boolean; unavailable_reason?: string };
+        assert.equal(health.can_receive, false);
+        assert.match(health.unavailable_reason ?? '', /inventory is insufficient/);
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
