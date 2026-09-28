@@ -1,6 +1,6 @@
 # CKB On-ramp
 
-CKB On-ramp is a non-custodial first-deposit flow. A user starts a Fiber node in the browser, the operator prepares inbound UDT liquidity, the browser signs a Fiber invoice, and CCH turns it into a Lightning invoice that the user pays from their own LND node.
+CKB On-ramp is a non-custodial first-deposit flow. A user starts a Fiber node in the browser, the operator prepares inbound UDT liquidity, the browser signs a Fiber invoice, and CCH turns it into a BOLT11 invoice that the user pays with their own Lightning wallet, such as Phoenix, Zeus, Blink, or Cash App.
 
 ## Local runbook: choose one path
 
@@ -60,6 +60,8 @@ npm install
 
 The browser starts a passkey-backed Fiber WASM node on CKB testnet, uses testnet cWBTC, and creates `Fibt` invoices. `npm run dev` does not start or fund the testnet operator. The operator still needs CKB capacity, cWBTC liquidity, reachable FNN/CCH RPC, and a reachable P2P address.
 
+For public Lightning operation, consumer wallets must be able to pay the BOLT11 invoice, and CCH's LND must be on the public Lightning Network with inbound liquidity. Do not ask users to connect their nodes to the operator.
+
 The development server and production preview supply the COOP/COEP and CSP headers required by Fiber WASM, and proxy the API and public CKB RPC through the same origin. Use the Vite URL while developing; opening built files directly or serving them without those headers will break `SharedArrayBuffer` and WASM startup.
 
 ## Path 2: run the local protocol stack
@@ -105,4 +107,4 @@ npm run build
 npm test
 ```
 
-Never send an LND macaroon, TLS key, seed phrase, passkey material, or Fiber key to this backend. The user pays the returned BOLT11 invoice from their own LND instance.
+Never send an LND macaroon, TLS key, seed phrase, passkey material, or Fiber key to this backend. The user only needs to pay the returned BOLT11 invoice with their own Lightning wallet.
