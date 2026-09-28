@@ -4,6 +4,12 @@ import { getBootstrapSession, getBootstrapSessionByChannelId, prepareInboundLiqu
 import { type OperatorCkbSender } from '../services/ccc.js';
 import { CchRpcError, cchGateway as defaultCchGateway, type CchGateway } from '../services/cch.js';
 import { FundingPolicyError } from '../services/errors.js';
+import {
+  InflightCollisionError,
+  InflightOutpointsTracker,
+  defaultInflightTracker,
+  extractFundingTxOutpointKeys,
+} from '../services/inflightOutpoints.js';
 import { getOperatorSigner } from '../services/operatorSigner.js';
 import { createQuote } from '../services/quote.js';
 
@@ -11,12 +17,14 @@ export interface ApiRouterDependencies {
   cchGateway?: CchGateway;
   prepareInboundLiquidity?: typeof prepareInboundLiquidity;
   operatorCkbSender?: OperatorCkbSender;
+  inflightTracker?: InflightOutpointsTracker;
 }
 
 export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
   const router = Router();
   const gateway = deps.cchGateway ?? defaultCchGateway;
   const prepLiquidity = deps.prepareInboundLiquidity ?? prepareInboundLiquidity;
+  const inflight = deps.inflightTracker ?? defaultInflightTracker;
 
   const quotes = new Map<string, Quote>();
   const idempotency = new Map<string, { paymentHash: string; fingerprint: string; createdAt: number }>();
@@ -121,6 +129,23 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
         return;
       }
 
+      // Inflight outpoint collision check: all-or-nothing reservation BEFORE consuming session.signed
+      const outpointKeys = extractFundingTxOutpointKeys(unsignedTx);
+      try {
+        if (outpointKeys.length > 0) {
+          inflight.tryReserve(outpointKeys, channelId);
+        }
+      } catch (err) {
+        if (err instanceof InflightCollisionError) {
+          res.status(409).json({
+            error: err.message,
+            conflicting_outpoints: err.conflictingKeys,
+          });
+          return;
+        }
+        throw err;
+      }
+
       // Atomic reservation to prevent TOCTOU concurrent double-signing
       session.signed = true;
 
@@ -134,6 +159,9 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
         });
       } catch (err) {
         session.signed = false; // rollback on failure
+        if (outpointKeys.length > 0) {
+          inflight.release(outpointKeys, channelId); // release inflight reservation on failure
+        }
         console.error('[sign-funding] failed:', err instanceof Error ? err.message : String(err));
         throw err;
       }
