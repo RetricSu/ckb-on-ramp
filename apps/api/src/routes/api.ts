@@ -1,6 +1,12 @@
 import { Router } from 'express';
 import type { CreateOrderRequest, Quote, QuoteRequest, SignFundingResponse } from '@ckb-on-ramp/contracts';
-import { getBootstrapSession, getBootstrapSessionByChannelId, prepareInboundLiquidity } from '../services/bootstrap.js';
+import {
+  getBootstrapSession,
+  getBootstrapSessionByChannelId,
+  getBootstrapSessionStore,
+  prepareInboundLiquidity,
+  recoverSessionFromFnn,
+} from '../services/bootstrap.js';
 import { type OperatorCkbSender } from '../services/ccc.js';
 import { CchRpcError, cchGateway as defaultCchGateway, type CchGateway } from '../services/cch.js';
 import { FundingPolicyError } from '../services/errors.js';
@@ -77,8 +83,14 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
     }
   });
 
-  router.get('/bootstrap/:sessionId', (req, res) => {
-    const session = getBootstrapSession(req.params.sessionId);
+  router.get('/bootstrap/:sessionId', async (req, res) => {
+    let session = getBootstrapSession(req.params.sessionId);
+    if (!session) {
+      session = getBootstrapSessionByChannelId(req.params.sessionId);
+    }
+    if (!session) {
+      session = await recoverSessionFromFnn(req.params.sessionId, gateway);
+    }
     if (!session) {
       res.status(404).json({ error: 'Bootstrap session not found' });
       return;
@@ -124,7 +136,10 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
       }
 
       // Gate: Verify channel_id is bound to an active accepted bootstrap session
-      const session = getBootstrapSessionByChannelId(channelId);
+      let session = getBootstrapSessionByChannelId(channelId);
+      if (!session) {
+        session = await recoverSessionFromFnn(channelId, gateway);
+      }
       if (!session) {
         res.status(400).json({ error: `channel_id (${channelId}) is not associated with an accepted bootstrap session` });
         return;
@@ -171,6 +186,7 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
 
       // Atomic reservation to prevent TOCTOU concurrent double-signing
       session.signed = true;
+      getBootstrapSessionStore().set(session.session_id, session);
 
       let signedTx: unknown;
       try {
@@ -182,6 +198,7 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
         });
       } catch (err) {
         session.signed = false; // rollback on failure
+        getBootstrapSessionStore().set(session.session_id, session);
         console.error('[sign-funding] failed:', err instanceof Error ? err.message : String(err));
         throw err;
       }

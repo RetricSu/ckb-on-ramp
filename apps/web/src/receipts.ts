@@ -1,5 +1,6 @@
 import type { SwapOrder } from '@ckb-on-ramp/contracts';
 import { formatCwbtc } from './amount';
+import { CHANNEL_TICKET_KEY } from './channelTicket';
 import type { SwapReceipt } from './types';
 
 const STORAGE_KEY = 'ckb-on-ramp:receipts';
@@ -60,6 +61,7 @@ export function clearAllReceipts(): void {
   try {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(LAST_ORDER_KEY);
+    localStorage.removeItem(CHANNEL_TICKET_KEY);
   } catch {
     // ignore
   }

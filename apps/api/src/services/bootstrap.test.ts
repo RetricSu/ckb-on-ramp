@@ -10,8 +10,10 @@ import {
   getBootstrapSession,
   getBootstrapSessionTask,
   prepareInboundLiquidity,
+  setBootstrapSessionStore,
   validateBootstrapRequest,
 } from './bootstrap.js';
+import { MemoryBootstrapSessionStore } from './bootstrapStore.js';
 import { CccOperatorCkbSender, type OperatorCkbSender } from './ccc.js';
 import type { CchGateway, OpenChannelParams, OpenChannelResult } from './cch.js';
 
@@ -27,6 +29,7 @@ const SUFFICIENT_INVENTORY = {
 
 describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
   beforeEach(() => {
+    setBootstrapSessionStore(new MemoryBootstrapSessionStore());
     clearBootstrapSessionsForTest();
   });
 
