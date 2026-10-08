@@ -2,8 +2,13 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { beforeEach, describe, it } from 'node:test';
 import express from 'express';
-import { ClientPublicTestnet } from '@ckb-ccc/core';
-import { CWBTC_SCRIPT, type BootstrapRequest } from '@ckb-on-ramp/contracts';
+import { ClientPublicTestnet, Transaction } from '@ckb-ccc/core';
+import {
+  CWBTC_SCRIPT,
+  type BootstrapRequest,
+  findNonFnnTransactionFields,
+  normalizeCkbTransactionForCcc,
+} from '@ckb-on-ramp/contracts';
 import apiRouter, { createApiRouter } from '../routes/api.js';
 import {
   clearBootstrapSessionsForTest,
@@ -1447,6 +1452,20 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
       assert.ok(signed.witnesses);
       assert.ok(signed.witnesses.length > 0);
       assert.notEqual(signed.witnesses[0], '0x'); // gift lock witness was signed
+
+      // Issue #1: the signed tx is handed verbatim to FNN `submit_signed_funding_tx`,
+      // which rejects any field outside the CKB JSON-RPC Transaction shape. The resolved
+      // `cellOutput` / `outputData` used for the policy checks must not leak into inputs.
+      assert.deepEqual(findNonFnnTransactionFields(signed), []);
+      for (const input of signed.inputs) {
+        assert.deepEqual(Object.keys(input).sort(), ['previous_output', 'since']);
+      }
+      assert.deepEqual(JSON.parse(JSON.stringify(signed)), signed, 'signed tx must be plain JSON');
+      // Same transaction (hash excludes witnesses) as the one the user node built.
+      const hashOf = (tx: unknown) =>
+        Transaction.from(normalizeCkbTransactionForCcc(tx) as Record<string, unknown>).hash();
+      assert.equal(hashOf(signed), hashOf(authenticDualFundedTx));
+      assert.deepEqual(signed.outputs_data, authenticDualFundedTx.outputs_data);
     });
   });
 });

@@ -203,6 +203,19 @@ export class InflightOutpointsTracker {
   }
 
   /**
+   * Returns the channel ids currently holding active reservations on any of `keys`.
+   * Reservations without a channel id are reported as `undefined` entries.
+   */
+  activeHolders(keys: string[], now: number = Date.now()): Array<string | undefined> {
+    const holders = new Set<string | undefined>();
+    for (const rawKey of keys) {
+      const existing = this.reservations.get(normalizeOutpointKey(rawKey));
+      if (existing && existing.expiresAt > now) holders.add(existing.channelId);
+    }
+    return Array.from(holders);
+  }
+
+  /**
    * Checks if an outpoint is currently in flight.
    */
   isReserved(key: string, now: number = Date.now()): boolean {

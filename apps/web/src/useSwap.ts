@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HealthResponse, NodeInfo, Quote, SwapOrder } from '@ckb-on-ramp/contracts';
 import type { Channel, FiberBrowserNode } from '@fiber-pay/sdk/browser';
 import { ApiError, api, isFundingInflightCollision } from './api';
+import {
+  MAX_FUNDING_ATTEMPTS,
+  abandonUnsignedChannel,
+  fundingRetryDelayMs,
+  signedFundingTxForSubmit,
+} from './fundingRetry';
 import { formatCwbtc, parseCwbtc, toHex } from './amount';
 import { CWBTC_SCRIPT, useFiber } from './FiberProvider';
 import { normalizeChannelStateName, waitForCwbtcChannelReady } from './channels';
@@ -464,7 +470,7 @@ export function useSwap() {
 
           const submitResult = await node.submitSignedFundingTx({
             channel_id: toHexChannelId(channelId),
-            signed_funding_tx: ticket.signedFundingTx as Record<string, unknown>,
+            signed_funding_tx: signedFundingTxForSubmit(ticket.signedFundingTx),
           });
 
           channelId = submitResult?.channel_id ?? channelId;
@@ -746,8 +752,9 @@ export function useSwap() {
             public: false,
           };
 
-          const MAX_INFLIGHT_OPEN_RETRIES = 5;
+          const MAX_INFLIGHT_OPEN_RETRIES = MAX_FUNDING_ATTEMPTS;
           let currentRoute = route;
+          let retryReason = 'Gift UTXO collision detected.';
           let finalSubmitResult: Awaited<ReturnType<typeof node.submitSignedFundingTx>> | undefined;
           let finalOpenResult: Awaited<ReturnType<typeof node.openChannelWithExternalFunding>> | undefined;
           let finalSignResult: Awaited<ReturnType<typeof api.signFunding>> | undefined;
@@ -756,10 +763,11 @@ export function useSwap() {
           for (let inflightAttempt = 0; inflightAttempt < MAX_INFLIGHT_OPEN_RETRIES; inflightAttempt += 1) {
             if (inflightAttempt > 0) {
               setProgressTitle('Re-opening Sponsored Channel');
-              setProgressMessage(`Gift UTXO collision detected. Re-opening channel with fresh UTXOs (attempt ${inflightAttempt + 1}/${MAX_INFLIGHT_OPEN_RETRIES})…`);
+              setProgressMessage(`${retryReason} Re-opening channel (attempt ${inflightAttempt + 1}/${MAX_INFLIGHT_OPEN_RETRIES})…`);
 
-              // Exponential backoff before full restart so conflicting transactions can settle or WASM node picks different cells
-              await new Promise((r) => setTimeout(r, 1000 * inflightAttempt));
+              // Back off so a conflicting in-flight funding tx (another node's) can land.
+              // This node's own stale reservations are released by the API on retry.
+              await new Promise((r) => setTimeout(r, fundingRetryDelayMs(inflightAttempt)));
 
               // Request a fresh bootstrap session from operator (整段重开)
               currentRoute = await prepareReceiveRoute({
@@ -846,12 +854,18 @@ export function useSwap() {
                 unsigned_funding_tx: openResult.unsigned_funding_tx,
               });
             } catch (signErr) {
-              if (isFundingInflightCollision(signErr) && inflightAttempt < MAX_INFLIGHT_OPEN_RETRIES - 1) {
-                console.warn(
-                  `[useSwap] sign-funding 409 collision on attempt ${inflightAttempt + 1}, retrying full open flow:`,
-                  signErr instanceof Error ? signErr.message : String(signErr),
-                );
-                continue; // Whole segment retry!
+              if (isFundingInflightCollision(signErr)) {
+                // Never signed, so this pending channel can be dropped safely.
+                await abandonUnsignedChannel(node, openResult.channel_id);
+                if (inflightAttempt < MAX_INFLIGHT_OPEN_RETRIES - 1) {
+                  console.warn(
+                    `[useSwap] sign-funding 409 collision on attempt ${inflightAttempt + 1}, retrying full open flow:`,
+                    signErr instanceof Error ? signErr.message : String(signErr),
+                  );
+                  retryReason = 'Operator funding cells are busy with another channel.';
+                  continue; // Whole segment retry!
+                }
+                throw new Error('Operator funding cells are still in use by another channel. Please try again in a few minutes.');
               }
               throw signErr;
             }
@@ -869,10 +883,25 @@ export function useSwap() {
             setProgressTitle('Submitting Funding Transaction');
             setProgressMessage('Submitting signed funding transaction to network…');
 
-            finalSubmitResult = await node.submitSignedFundingTx({
-              channel_id: openResult.channel_id,
-              signed_funding_tx: signResult.signed_funding_tx as Record<string, unknown>,
-            });
+            try {
+              finalSubmitResult = await node.submitSignedFundingTx({
+                channel_id: openResult.channel_id,
+                signed_funding_tx: signedFundingTxForSubmit(signResult.signed_funding_tx),
+              });
+            } catch (submitErr) {
+              // The operator already signed this tx, so the channel is NOT abandoned here
+              // (it may still be broadcast). Re-open with a fresh session: the API releases
+              // this node's reservation if the old tx never reached the chain (issue #2).
+              if (inflightAttempt < MAX_INFLIGHT_OPEN_RETRIES - 1) {
+                console.warn(
+                  `[useSwap] submit_signed_funding_tx failed on attempt ${inflightAttempt + 1}, retrying full open flow:`,
+                  submitErr instanceof Error ? submitErr.message : String(submitErr),
+                );
+                retryReason = 'Funding submission failed.';
+                continue;
+              }
+              throw submitErr;
+            }
             finalOpenResult = openResult;
             finalSignResult = signResult;
             break;
