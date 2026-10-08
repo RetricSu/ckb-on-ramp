@@ -6,11 +6,12 @@ import {
   Transaction,
   fixedPointFrom,
 } from '@ckb-ccc/core';
+import { JsonRpcTransformers } from '@ckb-ccc/core/advanced';
 import {
   CWBTC_SCRIPT,
   type CkbScript,
   normalizeCkbTransactionForCcc,
-  normalizeCkbTransactionForRpc,
+  toFnnRpcTransaction,
 } from '@ckb-on-ramp/contracts';
 import { redactSecret } from '../utils/redact.js';
 import { FundingPolicyError } from './errors.js';
@@ -32,6 +33,18 @@ export {
   MAX_TOTAL_INPUT_CAPACITY_SHANNONS,
 };
 
+/**
+ * Converts a CCC transaction into the exact JSON shape accepted by FNN's
+ * `submit_signed_funding_tx` (CKB JSON-RPC `Transaction`, snake_case, inputs carrying
+ * only `previous_output` + `since`).
+ */
+export function serializeSignedFundingTx(tx: Transaction): Record<string, unknown> {
+  return toFnnRpcTransaction(JsonRpcTransformers.transactionFrom(tx));
+}
+
+/** On-chain status of a signed funding tx, as reported by the CKB node. */
+export type FundingTxChainStatus = 'unknown' | 'sent' | 'pending' | 'proposed' | 'committed' | 'rejected';
+
 export interface CapacityGiftResult {
   txHash: string;
 }
@@ -48,6 +61,8 @@ export interface OperatorCkbSender {
   getFundingLockScript?(): Promise<CkbScript>;
   signFundingTransaction?(unsignedTx: unknown, options?: SignFundingOptions): Promise<unknown>;
   getInventory?(fnnFundingLock: CkbScript): Promise<OperatorInventory>;
+  /** Looks up a previously signed funding tx on chain (used to tell a dead reservation from an in-flight one). */
+  getFundingTxStatus?(signedTx: unknown): Promise<FundingTxChainStatus>;
 }
 
 export class CccOperatorCkbSender implements OperatorCkbSender {
@@ -152,21 +167,28 @@ export class CccOperatorCkbSender implements OperatorCkbSender {
 
       // 3. Sign operator inputs
       const signedTx = await this.signer.signOnlyTransaction(tx);
-      // CCC Transaction holds BigInt/mol Proxy values that JSON.stringify cannot
-      // serialize directly; round-trip with a bigint->hex replacer to get a plain
-      // JSON value before converting keys back to snake_case RPC shape.
-      const plain = JSON.parse(
-        JSON.stringify(signedTx, (_key, v) =>
-          typeof v === 'bigint' ? `0x${v.toString(16)}` : v,
-        ),
-      );
-      return normalizeCkbTransactionForRpc(plain);
+      // Serialize with CCC's canonical CKB JSON-RPC transformer. Step 1 attached the
+      // resolved `cellOutput` / `outputData` to every input for policy checks; a generic
+      // JSON round-trip would leak them into `inputs[]`, and FNN's
+      // `submit_signed_funding_tx` rejects the tx ("unknown field `cellOutput`").
+      return serializeSignedFundingTx(signedTx);
     } catch (err) {
       if (err instanceof FundingPolicyError) {
         throw err;
       }
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`Operator failed to sign funding transaction: ${this.redactKey(msg)}`);
+    }
+  }
+
+  async getFundingTxStatus(signedTx: unknown): Promise<FundingTxChainStatus> {
+    const txHash = Transaction.from(normalizeCkbTransactionForCcc(signedTx) as Record<string, unknown>).hash();
+    try {
+      const response = await this.client.getTransaction(txHash);
+      return (response?.status as FundingTxChainStatus | undefined) ?? 'unknown';
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to look up funding transaction ${txHash}: ${this.redactKey(msg)}`);
     }
   }
 

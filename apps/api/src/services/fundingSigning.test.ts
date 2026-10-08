@@ -290,3 +290,72 @@ describe('Funding signature authorization and recovery', () => {
     assert.throws(() => new FileBootstrapSessionStore(storeFile), SyntaxError);
   });
 });
+
+describe('Superseding stale same-node reservations (issue #2)', () => {
+  const CHANNEL_B = '0x' + 'bc'.repeat(32);
+  const OTHER_NODE = '03' + '34'.repeat(32);
+  let store: MemoryBootstrapSessionStore;
+  let tracker: InflightOutpointsTracker;
+
+  beforeEach(() => {
+    store = new MemoryBootstrapSessionStore();
+    store.set(SESSION.session_id, { ...SESSION, expires_at: Date.now() + 300_000 });
+    store.set('retry-session', {
+      ...SESSION, session_id: 'retry-session', channel_id: CHANNEL_B, expires_at: Date.now() + 300_000,
+    });
+    setBootstrapSessionStore(store);
+    tracker = new InflightOutpointsTracker();
+  });
+  afterEach(() => setBootstrapSessionStore(new MemoryBootstrapSessionStore()));
+
+  function sender(status?: string, lookups: string[] = []) {
+    return {
+      sendCapacityGift: async () => ({ txHash: 'unused' }),
+      signFundingTransaction: async (tx: unknown) => ({ ...tx as object, witnesses: ['0xsigned'] }),
+      ...(status === undefined ? {} : {
+        getFundingTxStatus: async () => { lookups.push(status); return status as never; },
+      }),
+    };
+  }
+
+  it('lets the same node retry immediately when its earlier signed tx never reached the chain', async () => {
+    const lookups: string[] = [];
+    const call = signingRoute({ inflightTracker: tracker, operatorCkbSender: sender('unknown', lookups) });
+    assert.equal((await call(TX, CHANNEL_ID)).status, 200);
+    const retry = await call(TX, CHANNEL_B);
+    assert.equal(retry.status, 200);
+    assert.equal(lookups.length, 1);
+    assert.equal(store.get(SESSION.session_id)?.status, 'failed');
+    assert.match(store.get(SESSION.session_id)?.message ?? '', /Superseded/);
+    assert.equal(tracker.activeHolders([`0x${'cd'.repeat(32)}:0x0`])[0], CHANNEL_B);
+  });
+
+  for (const status of ['sent', 'pending', 'proposed', 'committed']) {
+    it(`keeps the 409 while the earlier funding tx is ${status}`, async () => {
+      const call = signingRoute({ inflightTracker: tracker, operatorCkbSender: sender(status) });
+      assert.equal((await call(TX, CHANNEL_ID)).status, 200);
+      const retry = await call(TX, CHANNEL_B);
+      assert.equal(retry.status, 409);
+      assert.match(retry.body.error ?? '', new RegExp(`in flight.*${status}`));
+      assert.equal(store.get(SESSION.session_id)?.status, 'provisioning_liquidity');
+      assert.equal(store.get('retry-session')?.signed, false);
+    });
+  }
+
+  it('never releases inputs reserved by a different node', async () => {
+    store.set('retry-session', { ...store.get('retry-session')!, node_pubkey: OTHER_NODE });
+    const lookups: string[] = [];
+    const call = signingRoute({ inflightTracker: tracker, operatorCkbSender: sender('unknown', lookups) });
+    assert.equal((await call(TX, CHANNEL_ID)).status, 200);
+    const other = await call(TX, CHANNEL_B);
+    assert.equal(other.status, 409);
+    assert.match(other.body.error ?? '', /another node/);
+    assert.equal(lookups.length, 0);
+  });
+
+  it('stays conservative when the signer cannot check chain status', async () => {
+    const call = signingRoute({ inflightTracker: tracker, operatorCkbSender: sender(undefined) });
+    assert.equal((await call(TX, CHANNEL_ID)).status, 200);
+    assert.equal((await call(TX, CHANNEL_B)).status, 409);
+  });
+});

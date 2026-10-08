@@ -141,7 +141,8 @@ export function assertFundingTxPolicy(
 
   if (signedInputCapacity > MAX_TOTAL_INPUT_CAPACITY_SHANNONS) {
     throw new FundingPolicyError(
-      `Total input capacity (${signedInputCapacity}) exceeds maximum allowed budget (${MAX_TOTAL_INPUT_CAPACITY_SHANNONS})`,
+      `Total input capacity (${signedInputCapacity}) exceeds maximum allowed budget (${MAX_TOTAL_INPUT_CAPACITY_SHANNONS}). ` +
+        'The user node picks operator gift cells itself; keep the operator gift wallet split into cells well below this budget (e.g. 300 CKB each).',
     );
   }
 

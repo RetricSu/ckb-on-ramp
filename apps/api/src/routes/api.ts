@@ -10,6 +10,7 @@ import { type OperatorCkbSender } from '../services/ccc.js';
 import { CchRpcError, cchGateway as defaultCchGateway, type CchGateway } from '../services/cch.js';
 import { FundingPolicyError } from '../services/errors.js';
 import { fundingRequestHash, FundingSigningError } from '../services/fundingSigning.js';
+import { releaseSupersededReservations } from '../services/fundingSupersede.js';
 import {
   InflightCollisionError,
   InflightOutpointsTracker,
@@ -232,7 +233,30 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
             throw new FundingSigningError(503, `Operator cannot fund this channel: ${readiness.reason ?? 'inventory is unavailable'}`);
           }
           // Other channels retain independent outpoint collision protection.
-          inflight.tryReserve(outpointKeys, channelId);
+          try {
+            inflight.tryReserve(outpointKeys, channelId);
+          } catch (collision) {
+            if (!(collision instanceof InflightCollisionError)) throw collision;
+            // A retry from the same node may supersede its own earlier attempt whose
+            // funding tx never reached the chain (issue #2); anything else stays a 409.
+            const superseded = await releaseSupersededReservations({
+              channelId,
+              session,
+              conflictingKeys: collision.conflictingKeys,
+              store,
+              inflight,
+              sender,
+              isSigning: (other) => other !== channelId && pendingSignatures.has(other),
+            });
+            if (superseded.released.length === 0) {
+              throw new InflightCollisionError(
+                `${collision.message}${superseded.blockedReason ? ` (${superseded.blockedReason})` : ''}`,
+                collision.conflictingKeys,
+              );
+            }
+            console.info(`[sign-funding] channel ${channelId} superseded stale reservation(s) of ${superseded.released.join(', ')}`);
+            inflight.tryReserve(outpointKeys, channelId);
+          }
           outpointsReserved = true;
           const fnnLock = gateway.getFnnFundingLockScript ? await gateway.getFnnFundingLockScript() : undefined;
           if (session.expires_at && Date.now() > session.expires_at) {

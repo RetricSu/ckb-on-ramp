@@ -132,3 +132,94 @@ export function normalizeCkbTransactionForCcc(value: unknown): unknown {
 export function normalizeCkbTransactionForRpc(value: unknown): unknown {
   return normalizeCkbTransactionByDirection(value, 'to-snake');
 }
+
+// ---------------------------------------------------------------------------
+// FNN (ckb_jsonrpc_types) transaction shape
+//
+// FNN's `submit_signed_funding_tx` (RPC and fiber-js WASM alike) deserializes the
+// transaction with `deny_unknown_fields`. Any key outside this whitelist, e.g. the
+// resolved-input metadata `cellOutput` / `outputData` that CCC attaches to inputs,
+// makes the whole submission fail with "unknown field ...".
+// ---------------------------------------------------------------------------
+const FNN_TX_FIELDS = {
+  transaction: ['version', 'cell_deps', 'header_deps', 'inputs', 'outputs', 'outputs_data', 'witnesses'],
+  cell_dep: ['out_point', 'dep_type'],
+  out_point: ['tx_hash', 'index'],
+  input: ['previous_output', 'since'],
+  output: ['capacity', 'lock', 'type'],
+  script: ['code_hash', 'hash_type', 'args'],
+} as const satisfies Record<string, readonly string[]>;
+
+/**
+ * Returns the JSON paths of every key in `tx` that FNN's transaction deserializer
+ * would reject as unknown. An empty array means the shape is acceptable.
+ */
+export function findNonFnnTransactionFields(tx: unknown): string[] {
+  const problems: string[] = [];
+  const check = (value: unknown, kind: keyof typeof FNN_TX_FIELDS, at: string) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    for (const key of Object.keys(value)) {
+      if (!(FNN_TX_FIELDS[kind] as readonly string[]).includes(key)) problems.push(`${at}.${key}`);
+    }
+  };
+  const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  const record = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+  const root = record(tx);
+  check(tx, 'transaction', '$');
+  asArray(root.cell_deps).forEach((dep, i) => {
+    check(dep, 'cell_dep', `$.cell_deps[${i}]`);
+    check(record(dep).out_point, 'out_point', `$.cell_deps[${i}].out_point`);
+  });
+  asArray(root.inputs).forEach((input, i) => {
+    check(input, 'input', `$.inputs[${i}]`);
+    check(record(input).previous_output, 'out_point', `$.inputs[${i}].previous_output`);
+  });
+  asArray(root.outputs).forEach((output, i) => {
+    check(output, 'output', `$.outputs[${i}]`);
+    check(record(output).lock, 'script', `$.outputs[${i}].lock`);
+    if (record(output).type != null) check(record(output).type, 'script', `$.outputs[${i}].type`);
+  });
+  return problems;
+}
+
+/**
+ * Projects a CKB transaction (snake_case RPC or camelCase CCC keys, possibly carrying
+ * extra metadata) onto exactly the JSON shape FNN accepts. Unknown keys are dropped;
+ * values are passed through unchanged, so the transaction hash and witnesses are
+ * preserved. Inputs without `since` get the canonical "0x0".
+ */
+export function toFnnRpcTransaction(tx: unknown): Record<string, unknown> {
+  const snake = normalizeCkbTransactionForRpc(tx) as Record<string, unknown>;
+  const record = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  const outPoint = (value: unknown) => ({ tx_hash: record(value).tx_hash, index: record(value).index });
+  const script = (value: unknown) => ({
+    code_hash: record(value).code_hash,
+    hash_type: record(value).hash_type,
+    args: record(value).args,
+  });
+
+  const result: Record<string, unknown> = {
+    version: snake.version ?? '0x0',
+    cell_deps: asArray(snake.cell_deps).map((dep) => ({
+      out_point: outPoint(record(dep).out_point),
+      dep_type: record(dep).dep_type,
+    })),
+    header_deps: asArray(snake.header_deps),
+    inputs: asArray(snake.inputs).map((input) => ({
+      previous_output: outPoint(record(input).previous_output),
+      since: record(input).since ?? '0x0',
+    })),
+    outputs: asArray(snake.outputs).map((output) => {
+      const out: Record<string, unknown> = { capacity: record(output).capacity, lock: script(record(output).lock) };
+      if (record(output).type != null) out.type = script(record(output).type);
+      return out;
+    }),
+    outputs_data: asArray(snake.outputs_data),
+    witnesses: asArray(snake.witnesses),
+  };
+  return result;
+}

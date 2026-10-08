@@ -100,6 +100,8 @@ Retries must preserve the original transaction field values, including hex quant
 ## Common failures
 
 - **Bootstrap returns HTTP 501:** the API has no valid `OPERATOR_CKB_PRIVATE_KEY`. Add the funded testnet operator key to the uncommitted `.env`, then restart `npm run dev`.
+- **`/api/sign-funding` returns "exceeds maximum allowed budget":** the user's node picks operator gift cells itself and the API refuses to sign more than 800 CKB of operator inputs per channel. Keep the operator gift wallet split into cells well below that (e.g. 300 CKB each) instead of one large cell.
+- **`/api/sign-funding` returns 409 "already in flight":** another node's funding of the same operator gift cells is still pending; the web app backs off and retries. A retry from the *same* node after a failed submit is not blocked: the API releases that node's earlier reservation once the CKB node reports its funding tx as unknown/rejected.
 - **Docker is missing or stopped:** `stack:up` requires both the `docker` CLI and a running Docker daemon. Start Docker Desktop and retry.
 - **Fiber WASM or `SharedArrayBuffer` fails:** use `http://localhost:5173` from Vite and confirm responses include `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. Third-party assets without compatible cross-origin headers can also be blocked.
 - **Passkey creation/unlock fails:** use a current browser with WebAuthn enabled, allow the prompt, and retry after a cancellation. Passkey capability varies by browser/platform; clearing site data also removes the local IndexedDB channel state.
