@@ -60,7 +60,9 @@ export interface FnnChannelItem {
   is_acceptor: boolean;
   state?: {
     state_name?: string;
+    state_flags?: string;
   };
+  shutdown_transaction_hash?: string | null;
   funding_udt_type_script?: {
     code_hash?: string;
     codeHash?: string;
@@ -74,7 +76,7 @@ export interface CchGateway {
   getNodeInfo(): Promise<NodeInfo>;
   openChannel(params: OpenChannelParams): Promise<OpenChannelResult>;
   acceptChannel?(params: AcceptChannelParams): Promise<AcceptChannelResult>;
-  listChannels?(params?: { only_pending?: boolean; pubkey?: string }): Promise<{ channels: FnnChannelItem[] }>;
+  listChannels?(params?: { only_pending?: boolean; include_closed?: boolean; pubkey?: string }): Promise<{ channels: FnnChannelItem[] }>;
   getFnnFundingLockScript?(): Promise<CkbScript | undefined>;
 }
 const extractLightningInvoice = (value: ReceiveBtcResult['incoming_invoice']): string => {
@@ -158,7 +160,7 @@ export class MockCchGateway implements CchGateway {
   async acceptChannel(_params: AcceptChannelParams): Promise<AcceptChannelResult> {
     return { channel_id: `mock_accept_${randomUUID()}` };
   }
-  async listChannels(_params?: { only_pending?: boolean; pubkey?: string }): Promise<{ channels: FnnChannelItem[] }> {
+  async listChannels(_params?: { only_pending?: boolean; include_closed?: boolean; pubkey?: string }): Promise<{ channels: FnnChannelItem[] }> {
     return { channels: [] };
   }
 }
@@ -281,7 +283,7 @@ export class RpcCchGateway implements CchGateway {
       channel_id: channelId,
     };
   }
-  async listChannels(params?: { only_pending?: boolean; pubkey?: string }): Promise<{ channels: FnnChannelItem[] }> {
+  async listChannels(params?: { only_pending?: boolean; include_closed?: boolean; pubkey?: string }): Promise<{ channels: FnnChannelItem[] }> {
     const raw = await this.call<{ channels?: FnnChannelItem[] }>('list_channels', [params ?? {}], this.fiberRpcUrl, 15_000);
     return {
       channels: Array.isArray(raw.channels) ? raw.channels : [],

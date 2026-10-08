@@ -39,45 +39,12 @@ export function getBootstrapSessionStore(): BootstrapSessionStore {
   return activeStore;
 }
 
-export function getBootstrapSession(sessionId: string): BootstrapSession | undefined {
+export function getBootstrapSession(sessionId: string) {
   return activeStore.get(sessionId);
 }
 
-export function getBootstrapSessionByChannelId(channelId: string): BootstrapSession | undefined {
+export function getBootstrapSessionByChannelId(channelId: string) {
   return activeStore.getByChannelId(channelId);
-}
-
-export async function recoverSessionFromFnn(
-  channelId: string,
-  gateway: CchGateway = cchGateway,
-  fundingAmount: string = config.operatorChannelFundingAmount,
-): Promise<BootstrapSession | undefined> {
-  if (!gateway.listChannels) return undefined;
-  try {
-    const target = channelId.trim().toLowerCase();
-    const res = await gateway.listChannels({});
-    const channels = res?.channels ?? [];
-    const matched = channels.find((ch) => String(ch.channel_id ?? '').trim().toLowerCase() === target);
-    if (!matched) return undefined;
-
-    const pubkey = String(matched.pubkey ?? '').replace(/^0x/, '');
-    const reconstructed: BootstrapSession = {
-      session_id: randomUUID(),
-      channel_id: matched.channel_id,
-      status: 'provisioning_liquidity',
-      node_pubkey: pubkey,
-      funding_amount: fundingAmount,
-      expires_at: Date.now() + 5 * 60 * 1000,
-      signed: false,
-      message: 'Reconstructed bootstrap session from FNN list_channels.',
-    };
-
-    activeStore.set(reconstructed.session_id, reconstructed);
-    return reconstructed;
-  } catch (err) {
-    console.warn(`[Bootstrap Recovery] Failed to query FNN for channel ${channelId}:`, err);
-    return undefined;
-  }
 }
 
 export function getBootstrapSessionTask(sessionId: string): Promise<void> | undefined {

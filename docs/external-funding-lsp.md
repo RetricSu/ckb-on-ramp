@@ -107,17 +107,17 @@ Fiber 谈死结构后不能改 input，所以**不能**「服务端选好 cell �
 2. `apps/api`：
    - `/api/node-info` 导出运营方出资锁 `funding_lock_script` 与出资金额；
    - `/api/bootstrap` 支持 `external_funding: true`，服务端监听 `NEGOTIATINGFUNDING` 要约并调用 `accept_channel` 出资 1.0 cWBTC；
-   - `POST /api/sign-funding` 实施 5 道严密安全闸（输入锁归属受信任锁集且链上真实校验、允许 cWBTC 找零与双钥部署、Fiber FundingLock 全脚本校验、UDT 进出绝对守恒、容量限额 250 CKB 与矿工费限额 0.1 CKB），并以 5 分钟 TTL + 原子置位防重放。
+   - `POST /api/sign-funding` 实施 5 道安全闸（输入锁归属受信任锁集且链上真实校验、允许 cWBTC 找零与双钥部署、Fiber FundingLock 全脚本校验、UDT 进出绝对守恒、容量限额 250 CKB 与矿工费限额 0.1 CKB）。2026-10-08 修复：5 分钟 TTL 限制首次签名；首次异步检查前持久化占用并绑定交易指纹，同交易并发共用签名、重试取回缓存结果，不同交易拒签。
    - `services/operatorSigner.ts`：提取懒加载单例与 fail-loud 异常传递。
 3. `apps/web`：
    - `peer.ts` 在检测到运营方出资锁时自动启用外部出资，直接返回包含 `operatorNode` 的就绪状态；
    - `useSwap.ts` 结合 `waitForCwbtcChannelReady` 统一轮询，排除未入账旧通道，正确消费 `submitResult.channel_id`，增加最大通道容量校验与签名毫秒级窗口容错重试。
 4. 并发开渠防护落地：
    - **预拆分小 Cell**：运营方通过 `ops/prep-gift-cells.mjs` 手工预拆分 gift 钱包为多份 ~220 CKB 小 Cell（每通道需要约 184 CKB 储备 + 矿工费与找零门槛）；
-   - **Inflight Outpoint 集合与 409 拒签**：API 在 `POST /api/sign-funding` 中抽取所有 inputs previous_output（格式 `0xtxHash:0xindex`），在原子标记 `session.signed = true` 之前调用 `tryReserve` 全有全无预占，默认 5 分钟 TTL。若检测到已被其他并发会话预占，立即返回 **HTTP 409 Conflict**，且不消耗 `session.signed` 标记；若签名过程中断或校验失败，立即释放预占；
+   - **Inflight Outpoint 集合与 409 拒签**：API 在 `POST /api/sign-funding` 中先同步持久化会话占用，再做库存检查与 outpoint 全有全无预占（格式 `0xtxHash:0xindex`，默认 5 分钟 TTL）。不同通道发生碰撞返回 **HTTP 409 Conflict**；在签名未成功返回的库存、预占或校验失败分支，持久化回滚会话占用并释放本次 outpoint 预占，允许新尝试。签名成功后若保存结果失败，保持占用、拒绝重新签名；
    - **前端整段重开**：前端 `useSwap.ts` 捕获 409 冲突后执行「整段重开」（重新请求 bootstrap 会话、重新触发 WASM 节点组装开渠、重新轮询承接并签名，至多重试 5 次，绝不拿同一 unsigned tx 重试）；
    - **取舍说明（细粒度 Inflight 锁 vs 全局 Mutex 等确认锁）**：未采用全局签名并等待链上确认（Global sign-and-wait-confirm lock）的方案，原因在于该方案会将所有用户开渠串行化（每次开渠等待链上确认需数分钟，系统整体并发吞吐量 < 0.05 TPS）。采用基于 Input Outpoint 的细粒度 Inflight 锁结合预拆小 Cell，可在 UTXO 池充足时实现高并发并行开渠，仅在选币碰撞时通过 409 触发重选；
    - **状态回收与容灾安全**：
      - 用户关页 / 签名超时：session `expires_at`（5 分钟）会拒绝超时签名；
      - 节点崩溃留下的 pending 通道：Fiber 底层 `external_funding_timeout`（默认 5 分钟）会自动 abort 并释放未广播/未确认的临时通道；
-     - API 进程崩溃 / 重启：内存中的 inflight map 虽被清空，但底层有链上双花防护与 session 过期时间双重保护，客户端按设计重新开渠即可安全收敛。
+     - API 进程崩溃 / 重启：已持久化签名结果的同交易请求取回原结果；占用已保存但结果未保存时拒绝重新签名。会话文件丢失时也拒签，不能用 FNN 通道列表重建授权；待旧 pending 通道结束后重新 bootstrap。文件存储与 inflight map 仅支持单 API 进程，不用于多实例共享签名钱包。

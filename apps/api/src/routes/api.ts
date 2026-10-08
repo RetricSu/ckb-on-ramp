@@ -5,11 +5,11 @@ import {
   getBootstrapSessionByChannelId,
   getBootstrapSessionStore,
   prepareInboundLiquidity,
-  recoverSessionFromFnn,
 } from '../services/bootstrap.js';
 import { type OperatorCkbSender } from '../services/ccc.js';
 import { CchRpcError, cchGateway as defaultCchGateway, type CchGateway } from '../services/cch.js';
 import { FundingPolicyError } from '../services/errors.js';
+import { fundingRequestHash, FundingSigningError } from '../services/fundingSigning.js';
 import {
   InflightCollisionError,
   InflightOutpointsTracker,
@@ -37,6 +37,7 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
   const gateway = deps.cchGateway ?? defaultCchGateway;
   const prepLiquidity = deps.prepareInboundLiquidity ?? prepareInboundLiquidity;
   const inflight = deps.inflightTracker ?? defaultInflightTracker;
+  const pendingSignatures = new Map<string, { hash: string; promise: Promise<SignFundingResponse> }>();
   const checkReceiveReadiness = async (fundingAmount?: string) => {
     try {
       return await getReceiveReadiness({
@@ -97,13 +98,33 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
       session = getBootstrapSessionByChannelId(req.params.sessionId);
     }
     if (!session) {
-      session = await recoverSessionFromFnn(req.params.sessionId, gateway);
-    }
-    if (!session) {
       res.status(404).json({ error: 'Bootstrap session not found' });
       return;
     }
     res.json(session);
+  });
+
+  // Read-only recovery of a cooperative-close hash when browser WASM omits it.
+  // This never reconstructs a bootstrap session or grants signing permission.
+  router.get('/channels/:channelId/close', async (req, res, next) => {
+    const session = getBootstrapSessionByChannelId(req.params.channelId);
+    if (!session?.node_pubkey || !gateway.listChannels) {
+      res.status(404).json({ error: 'Known channel session not found' });
+      return;
+    }
+    try {
+      const normalize = (value: string) => value.replace(/^0x/i, '').toLowerCase();
+      const listed = await gateway.listChannels({ include_closed: true, pubkey: session.node_pubkey });
+      const channel = listed.channels.find((item) =>
+        normalize(item.channel_id) === normalize(req.params.channelId) &&
+        normalize(item.pubkey) === normalize(session.node_pubkey!),
+      );
+      const hash = channel?.shutdown_transaction_hash;
+      const cooperative = channel?.state?.state_name?.replace(/[^a-z]/gi, '').toLowerCase() === 'closed' &&
+        channel.state.state_flags === 'COOPERATIVE';
+      res.json({ channel_id: session.channel_id, shutdown_transaction_hash:
+        cooperative && typeof hash === 'string' && /^0x[0-9a-f]{64}$/i.test(hash) ? hash : null });
+    } catch (error) { next(error); }
   });
 
   router.post('/bootstrap', async (req, res) => {
@@ -132,32 +153,45 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
 
   router.post('/sign-funding', async (req, res) => {
     try {
-      const channelId = String(req.body?.channel_id ?? '').trim();
+      const channelId = String(req.body?.channel_id ?? '').trim().toLowerCase();
       const unsignedTx = req.body?.unsigned_funding_tx;
       if (!channelId) {
         res.status(400).json({ error: 'channel_id is required' });
         return;
       }
-      if (!unsignedTx || typeof unsignedTx !== 'object') {
+      if (!unsignedTx || typeof unsignedTx !== 'object' || Array.isArray(unsignedTx)) {
         res.status(400).json({ error: 'unsigned_funding_tx is required' });
         return;
       }
 
-      // Gate: Verify channel_id is bound to an active accepted bootstrap session
-      let session = getBootstrapSessionByChannelId(channelId);
-      if (!session) {
-        session = await recoverSessionFromFnn(channelId, gateway);
-      }
+      // FNN channel status cannot recreate a lost signing authorization.
+      const store = getBootstrapSessionStore();
+      const session = store.getByChannelId(channelId);
       if (!session) {
         res.status(400).json({ error: `channel_id (${channelId}) is not associated with an accepted bootstrap session` });
         return;
       }
-      if (session.status !== 'provisioning_liquidity') {
-        res.status(400).json({ error: `Channel session is not in provisioning state (status: ${session.status})` });
+      const requestHash = fundingRequestHash(unsignedTx);
+      if (session.signed) {
+        if (!session.funding_request_hash || session.funding_request_hash !== requestHash) {
+          res.status(400).json({ error: `Funding transaction for channel (${channelId}) has already been signed or reserved for a different transaction` });
+          return;
+        }
+        // Retrieving an existing result does not consume inventory or grant new authorization.
+        if (session.signed_funding_tx !== undefined) {
+          res.json({ channel_id: channelId, signed_funding_tx: session.signed_funding_tx });
+          return;
+        }
+        const pending = pendingSignatures.get(channelId);
+        if (pending?.hash === requestHash) {
+          res.json(await pending.promise);
+          return;
+        }
+        res.status(503).json({ error: 'Funding signing outcome is unavailable. Do not re-sign this channel; wait for the pending channel to resolve or start a new bootstrap.' });
         return;
       }
-      if (session.signed) {
-        res.status(400).json({ error: `Funding transaction for channel (${channelId}) has already been signed` });
+      if (session.status !== 'provisioning_liquidity') {
+        res.status(400).json({ error: `Channel session is not in provisioning state (status: ${session.status})` });
         return;
       }
       if (session.expires_at && Date.now() > session.expires_at) {
@@ -178,65 +212,62 @@ export function createApiRouter(deps: ApiRouterDependencies = {}): Router {
         return;
       }
 
-      const readiness = await getReceiveReadiness({
-        gateway,
-        sender,
-        fundingAmount: session.funding_amount,
-        externalFunding: true,
-        inventory: deps.operatorInventory,
-      });
-      if (!readiness.canReceive) {
-        res.status(503).json({
-          error: `Operator cannot fund this channel: ${readiness.reason ?? 'inventory is unavailable'}`,
-        });
+      const outpointKeys = extractFundingTxOutpointKeys(unsignedTx);
+      // Synchronous durable claim BEFORE the first await, also guarding other router instances.
+      const reservedSession = { ...session, signed: true, funding_request_hash: requestHash };
+      store.set(session.session_id, reservedSession);
+
+      const signing = (async (): Promise<SignFundingResponse> => {
+        let outpointsReserved = false;
+        let signedTx: unknown;
+        try {
+          const readiness = await getReceiveReadiness({
+            gateway,
+            sender,
+            fundingAmount: session.funding_amount,
+            externalFunding: true,
+            inventory: deps.operatorInventory,
+          });
+          if (!readiness.canReceive) {
+            throw new FundingSigningError(503, `Operator cannot fund this channel: ${readiness.reason ?? 'inventory is unavailable'}`);
+          }
+          // Other channels retain independent outpoint collision protection.
+          inflight.tryReserve(outpointKeys, channelId);
+          outpointsReserved = true;
+          const fnnLock = gateway.getFnnFundingLockScript ? await gateway.getFnnFundingLockScript() : undefined;
+          if (session.expires_at && Date.now() > session.expires_at) {
+            throw new FundingSigningError(400, `Bootstrap session for channel (${channelId}) has expired`);
+          }
+          signedTx = await sender.signFundingTransaction!(unsignedTx, {
+            expectedExactUdtAmount: BigInt(session.funding_amount!),
+            allowedAdditionalInputLocks: fnnLock ? [fnnLock] : undefined,
+          });
+        } catch (error) {
+          // No signature returned: restore authorization before allowing a new attempt.
+          store.set(session.session_id, session);
+          if (outpointsReserved) inflight.release(outpointKeys, channelId);
+          throw error;
+        }
+
+        // A failure here must KEEP authorization consumed: signing already completed.
+        store.set(session.session_id, { ...reservedSession, signed_funding_tx: signedTx });
+        return { channel_id: channelId, signed_funding_tx: signedTx };
+      })();
+      pendingSignatures.set(channelId, { hash: requestHash, promise: signing });
+      try {
+        res.json(await signing);
+      } finally {
+        pendingSignatures.delete(channelId);
+      }
+    } catch (error) {
+      if (error instanceof InflightCollisionError) {
+        res.status(409).json({ error: error.message, conflicting_outpoints: error.conflictingKeys });
         return;
       }
-
-      // Inflight outpoint collision check: all-or-nothing reservation BEFORE consuming session.signed
-      const outpointKeys = extractFundingTxOutpointKeys(unsignedTx);
-      try {
-        if (outpointKeys.length > 0) {
-          inflight.tryReserve(outpointKeys, channelId);
-        }
-      } catch (err) {
-        if (err instanceof InflightCollisionError) {
-          res.status(409).json({
-            error: err.message,
-            conflicting_outpoints: err.conflictingKeys,
-          });
-          return;
-        }
-        throw err;
+      if (error instanceof FundingSigningError) {
+        res.status(error.status).json({ error: error.message });
+        return;
       }
-
-      // Atomic reservation to prevent TOCTOU concurrent double-signing
-      session.signed = true;
-      getBootstrapSessionStore().set(session.session_id, session);
-
-      let signedTx: unknown;
-      try {
-        const fnnLock = gateway.getFnnFundingLockScript ? await gateway.getFnnFundingLockScript() : undefined;
-        const allowedAdditional = fnnLock ? [fnnLock] : undefined;
-        signedTx = await sender.signFundingTransaction(unsignedTx, {
-          expectedExactUdtAmount: BigInt(session.funding_amount),
-          allowedAdditionalInputLocks: allowedAdditional,
-        });
-      } catch (err) {
-        session.signed = false; // rollback on failure
-        getBootstrapSessionStore().set(session.session_id, session);
-        if (outpointKeys.length > 0) {
-          inflight.release(outpointKeys, channelId); // release inflight reservation on failure
-        }
-        console.error('[sign-funding] failed:', err instanceof Error ? err.message : String(err));
-        throw err;
-      }
-
-      const response: SignFundingResponse = {
-        channel_id: channelId,
-        signed_funding_tx: signedTx,
-      };
-      res.json(response);
-    } catch (error) {
       if (error instanceof FundingPolicyError) {
         res.status(400).json({ error: error.message });
         return;

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { useSwap } from '../useSwap';
 import { connectCccWallet, type ConnectedCccWallet } from '../cccWallet';
+import { api } from '../api';
 import {
   CLOSE_ERRORS,
   L1_SETTLEMENT_COPY,
@@ -135,9 +136,10 @@ export function AccountModal({ swap }: AccountModalProps) {
         nodeRunning: fiber.isRunning,
         node,
         nodeDefaultLock,
-        waitForTx: async (txHash) => {
+        getOperatorCloseHash: async (channelId) => (await api.channelClose(channelId)).shutdown_transaction_hash,
+        waitForTx: async (txHash, settlement) => {
           setCloseProgress('Close transaction broadcast. Waiting for CKB confirmation…');
-          await waitForCkbTxCommitted(txHash);
+          await waitForCkbTxCommitted(txHash, { settlement });
         },
       });
       setCloseResult(result);

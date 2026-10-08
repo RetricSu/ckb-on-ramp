@@ -1,0 +1,121 @@
+{
+  "date": "2026-10-08",
+  "network": {
+    "ckb": "testnet",
+    "fiber": "Fibt",
+    "cchFullPayment": "blocked by Bitcoin testnet LND",
+    "browser": "isolated headless Chromium, DEV password; passkey/UniSat UI not tested"
+  },
+  "versions": {
+    "fiber": "0.9.0",
+    "commit": "e6cb7ac 2026-08-06",
+    "fiberPayCli": "0.3.0"
+  },
+  "signatureRecovery": {
+    "status": 200,
+    "sameSignature": true,
+    "at": "2026-10-08T01:41:00.946Z"
+  },
+  "authorization": {
+    "at": "2026-10-08T01:57:18.057Z",
+    "concurrentReplayStatuses": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "allIdentical": true,
+    "changedTransactionStatus": 400,
+    "missingStoreStatus": 400,
+    "missingStoreError": "channel_id (0x0a54bd179182ff49f474acd7638c1d2e469de1e650de6f702d608f6cd76514a7) is not associated with an accepted bootstrap session",
+    "durableStoreUnchanged": true,
+    "missingStoreCreated": false
+  },
+  "firstFunding": "0x8f985ce00448db32a92456d0cfd0a32e553d5f4ef03d03c1efc5977b7c0e2e95",
+  "finalRun": {
+    "startedAt": "2026-10-08T02:01:59.848Z",
+    "completedAt": "2026-10-08T02:04:26.874Z",
+    "channelId": "0x47c74ee4a1c7a44c086d0d59e3a3b3e909a2537fc6cc6e8facc50a48e89b223f",
+    "fundingHash": "0xdd3e8f08bdf35358352283e1ce16836882eb9816d7accade0b67fcebab65efc7",
+    "fundingStatus": {
+      "block_hash": "0x87a03132c35a4c29a2b230b2990b5c005c19af0ac1c547e926c52f778e0ce7dc",
+      "block_number": "0x159ea52",
+      "reason": null,
+      "status": "committed",
+      "tx_index": "0x1"
+    },
+    "receive": {
+      "paymentHash": "0x833831eefe787fa7144767d4b932ddafd1fd5375baafe162c6ac4eef82d04db2",
+      "status": "Success",
+      "amountRaw": "1000"
+    },
+    "spend": {
+      "paymentHash": "0xc8004df21f5df2ee78ab10a1a68001e090ca0dbd828e8737b6a8e0cc52b911bf",
+      "amountRaw": "100",
+      "feeRaw": "0",
+      "channelId": "0x47c74ee4a1c7a44c086d0d59e3a3b3e909a2537fc6cc6e8facc50a48e89b223f",
+      "status": "Success",
+      "operatorInvoiceStatus": "Paid"
+    },
+    "balanceAfterSpend": "900",
+    "close": {
+      "txHash": "0x63fbb5f424fa2d3b45010d3850e1fdf75505ea1fa9343a4260890033898a6c28",
+      "address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq0wsjg2hk07ghp5ag2fkxrrn86e96yhxdgpl3km3",
+      "channelId": "0x47c74ee4a1c7a44c086d0d59e3a3b3e909a2537fc6cc6e8facc50a48e89b223f",
+      "status": {
+        "block_hash": "0x5db11f07309bc724faa7b0d9e8c2387474c68dc7c23aaf47335249db91501ed5",
+        "block_number": "0x159ea5a",
+        "reason": null,
+        "status": "committed",
+        "tx_index": "0x4"
+      },
+      "inputs": [
+        {
+          "previous_output": {
+            "index": "0x0",
+            "tx_hash": "0xdd3e8f08bdf35358352283e1ce16836882eb9816d7accade0b67fcebab65efc7"
+          },
+          "since": "0x0"
+        }
+      ],
+      "recipientOutput": {
+        "capacity": "0x448b9b4f9",
+        "lock": {
+          "args": "0xee8490abd9fe45c34ea149b186399f592e897335",
+          "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+          "hash_type": "type"
+        },
+        "type": {
+          "args": "0x9a1086531ed6dc69e0bd44cef5278e03faf3015b31aff60b08fb87663ce8507100000000",
+          "code_hash": "0x25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
+          "hash_type": "type"
+        }
+      },
+      "recipientOutputData": "0x84030000000000000000000000000000"
+    },
+    "cchError": "FNN RPC [-32000]: LND invoice for payment hash Hash256(0x33c5fb313fcc8e8b97e2faa183124de09677b34ceb10eef03145d92e32cf6f98) does not match the CCH order: encoded currency is Regtest, expected BitcoinTestnet",
+    "nativeClose": {
+      "channelId": "0x47c74ee4a1c7a44c086d0d59e3a3b3e909a2537fc6cc6e8facc50a48e89b223f",
+      "peer": "028b768500e67c1f2c679c6fa16ace350160b89ee3054920b64e13470d6bc2babc",
+      "state": {
+        "state_name": "Closed",
+        "state_flags": "COOPERATIVE"
+      },
+      "shutdownTransactionHash": "0x63fbb5f424fa2d3b45010d3850e1fdf75505ea1fa9343a4260890033898a6c28"
+    }
+  },
+  "browserCloseOmission": {
+    "observedOnChannel": "0x0a54bd179182ff49f474acd7638c1d2e469de1e650de6f702d608f6cd76514a7",
+    "reportedVersion": "0.9.0",
+    "reportedCommit": "e6cb7ac 2026-08-06",
+    "state": {
+      "state_name": "SHUTTING_DOWN",
+      "state_flags": "WAITING_COMMITMENT_CONFIRMATION"
+    },
+    "hasShutdownTransactionHashField": false
+  }
+}

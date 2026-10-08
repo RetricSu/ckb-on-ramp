@@ -55,4 +55,7 @@ export const api = {
   signFunding: (payload: SignFundingRequest) => request<SignFundingResponse>('/sign-funding', {
     method: 'POST', body: JSON.stringify(payload),
   }),
+  channelClose: (channelId: string) => request<{ channel_id: string; shutdown_transaction_hash: string | null }>(
+    `/channels/${encodeURIComponent(channelId)}/close`,
+  ),
 };

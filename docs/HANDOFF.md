@@ -1,6 +1,30 @@
 # CKB On-ramp handoff
 
-更新时间：2026-09-23
+更新时间：2026-10-08
+
+## 2026-10-08 真实联调续篇
+
+实际使用 fiber-pay、offckb、浏览器 WASM 与 CKB testnet 完成签名丢响应/API 重启/刷新开渠、Fiber 支付及协作关渠到账。详细步骤、金额和交易证据见 [真实联调记录](testnet-e2e-2026-10-08.md)。本轮 Chromium 测试走 DEV password；桌面 passkey PRF 与 UniSat 交互仍待人类验收。
+
+**完整 CCH 入金仍未通过**：v0.9.0 明确要求 `Fibt → BitcoinTestnet`，实测拒绝当前 regtest LND 发票；新建 Bitcoin testnet LND 尚未同步。下方 2026-09-23 的混合网络成功叙述为历史记录，不能复用作本版本步骤。直接 Fiber 付款不等于 CCH 订单 Success。
+
+新增关渠确认回退：native FNN 同 session/channel/peer 的 `Closed / COOPERATIVE` hash 只作为线索，浏览器必须进一步确认真实链上 funding input、收款 lock、cWBTC 类型与金额；不重建签名授权。新增 13 项回归，全量 202 项测试、typecheck/build 通过。持久化单测清理改为隔离内存 store，实时联调用独立 `BOOTSTRAP_STORE_PATH`。
+
+Sentinel 最终只读复核 Pass；运行时检查由 Maestro 执行。签名恢复与 Fiber/L1 退出满足本轮验收，完整 CCH 入金未通过，桌面 passkey/UniSat 未验收。测试服务及四个测试容器已停止，私有配置、钱包、Chromium profile 和测试入口保留在 gitignored `ops/data/testnet-e2e/`；工作树临时 `.env` 和网页测试入口已移除，详见联调记录的收尾说明。人类保留最终交付接受权。
+
+证据边界：最后一轮记录了关渠成功与链上结算，但未单独记录 hash 来源，不能将其作为真实命中 operator 回退分支的机器证据。首次 WASM 轮询超时已观测，慢确认与持续卡住的区别仍未确认；下一轮增加 hash 来源记录及旧通道状态探针。
+
+## 2026-10-08 签名并发与恢复修复
+
+- `sign-funding` 在第一次异步检查前将会话与完整交易指纹绑定并持久化占用；同交易并发请求共用一次签名，不同交易拒签。
+- 签名结果先写入会话文件再响应。同交易重试（包括响应丢失、API 重启、会话 TTL 已过）只能取回原结果，不会再次签名；已签名的旧会话没有缓存结果时仍拒签。
+- 重试使用开渠票中保存的原交易字段值，保留十六进制数量表示与 witnesses；仅对象键顺序和 snake/camel 字段名差异会被归一化（`0x0` 改为 `0x00` 仍会拒签）。
+- 会话文件采用临时文件 + 原子替换；读写失败不再静默忽略。签名完成但结果落盘失败时保留已占用授权，不能通过重试重新签名。
+- 仓库验证：`npm run typecheck`、`npm run build`、`npm test` 均通过，189 项测试（80 API + 108 web + 1 contracts）；新增 16 项签名与持久化回归测试。
+- Sentinel 已只读核对本轮 diff，静态复核 Pass，无必须修改项；测试由 Maestro 实际运行，Sentinel 未独立复跑。此结论不代表人类最终交付接受或真实资金 E2E 验收。
+- 落盘失败的响应边界：当次请求返回 500；若授权已占用但没有可取回的结果，后续同交易请求返回 503，不能重新签名。若最初占用写入失败，则签名者不会被调用。
+- **移除 FNN 通道列表重建签名授权**：API 重启靠原会话文件恢复。文件丢失时 GET bootstrap 返回 404，签名返回 400；必须等待旧 pending 通道结束后新建 bootstrap，不能仅凭通道状态重开签名闸门。
+- 以下 Chrome 真机场景仍待验证；本节的修复与单测不等于真实浏览器端到端验收。
 
 ## 当前交付状态（2026-09-23）
 
@@ -24,7 +48,7 @@ cWBTC 用 https://faucet-cwbtc.ckb.dev/ 申领。本地 LND / 运营方进程见
   3. 输出白名单与 Fiber FundingLock 脚本校验：仅允许恰好 1 个 funding output（lock 为 Fiber FundingLock `0x6c6788...a6d7c`，type 为 `CWBTC_SCRIPT`，capacity 严格 ≤ 250 CKB，UDT 金额精确等于协商出资额）；
   4. 找零输出与 UDT 守恒定律校验：找零锁必须回退运营方，且满足 `ΣinputsUdt - ΣchangeUdt === fundingUdt`，无任何一聪资产损耗；
   5. 矿工费与容量预算闸：输入总容量 ≤ 500 CKB，矿工费 ≤ 0.1 CKB。
-- 会话绑定与防重放：强制绑定已 accept 的会话，5 分钟 TTL，签名后立即原子标记 `signed = true`，重复提交直接拒签。
+- 会话绑定与防重放（2026-10-08 更新）：强制绑定已 accept 的会话，5 分钟 TTL 限制首次签名；第一次异步检查前原子占用并绑定交易指纹，同交易重试取回持久化结果，不同交易拒签。
 - 用户节点调用 `submitSignedFundingTx` 广播交易，找零自动回退至运营方锁，彻底消除在用户地址沉淀闲置 CKB Dust 的坏账敞口。
 - **并发开渠与 UTXO 冲突防护**：`ops/prep-gift-cells.mjs` 预拆 ~220 CKB 小 Cell；`POST /api/sign-funding` 基于 input outpoint 的 inflight 内存占用集合（5min TTL、409 拒签不消耗 signed）；前端 `useSwap` 撞锁整段重开（新 bootstrap + 重新开渠 + 重新签名，上限 5 次）。
 
@@ -218,16 +242,16 @@ PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性。2026-09-2
      针对同一 Chrome、同一 origin、同一 passkey，实现了刷新后自动拉起 WASM 节点并续接任务的状态机：
      - 前端抽出 `shouldResumeNode({ hasPasskeyConfigured, pendingOrder, pendingReceipts, pendingChannel })` 纯函数，若有未完成单、待处理开渠票或已配置 passkey，mount 时自动触发 `startWithPasskey`（允许弹一次系统 passkey）唤醒节点，唤醒后自动重连运营方 peer（`pickPeerAddress` + `connectPeer`）、刷新通道余额并继续 CCH 订单轮询。
      - 开渠阶段引入前端开渠票 `channelTicket` 持久化到 localStorage（含 `session_id`, `channel_id`, `unsigned_funding_tx`, `signed_funding_tx`, `step`），解决 WASM 重启后无法重新取得 `unsigned_funding_tx` 的隐患。
-     - 服务端 bootstrap sessions 改造为可插拔 `BootstrapSessionStore`（默认落地 `ops/data/bootstrap-sessions.json`），并在 store miss 时基于 FNN `list_channels` 按 `channel_id` 自动重建会话，API 重启后开渠与 `sign-funding` 不中断。
+     - 服务端 bootstrap sessions 使用可插拔 `BootstrapSessionStore`（默认落地 `ops/data/bootstrap-sessions.json`），API 重启后从原文件恢复会话和签名结果。2026-10-08 移除 store miss 时的 FNN 自动重建授权；丢失记录时拒签。
      - `RpcCchGateway.getOrder` 以 `get_cch_order` 为真相，空缓存不 404；前端取消单次 404 立即标 Expired 的错误行为，采用有限重试门限（`shouldExpireOrderOn404`），仅 CCH 明确终态才停止。
    - **三种跨刷新场景的 Chrome 手动 E2E 步骤及实测状态**：
      - **场景 1：开渠中 / 等待 sign-funding 刷新**
-       1. 启动全栈（`bash ops/stack.sh up`）并在 Chrome 中打开 `http://localhost:5173`。
+       1. 按根 README 的 **Path 1** 配置 testnet operator FNN/CCH、运营方密钥、CKB/cWBTC 库存及浏览器可达的 WS/WSS；运行 `npm run dev` 并在 Chrome 打开 `http://localhost:5173`。不要使用 `ops/stack.sh up` 生成的 devnet `.env`；该协议栈的 CLI E2E 不验证网页。支付钱包必须匹配本次 CCH 返回发票的 Lightning 网络。
        2. 输入金额点击 Swap，授权 passkey 启动节点。
        3. 用户 WASM 节点发起 `openChannelWithExternalFunding` 生成 `unsigned_funding_tx` 并写入本地开渠票。
        4. 在看到进度弹窗「等待运营方接受要约」或「请求运营方签名」时，立即按 Cmd+R 刷新。
        5. 刷新后页面检测到开渠票，自动通过 passkey 拉起节点并重连 peer。
-       6. 前端从开渠票读出 `unsigned_funding_tx` 向 `/api/sign-funding` 提交签名（即使 API 刚重启，服务端也从 FNN 重建会话），节点收到签名后提交广播，继续等待链上确认并出票。
+       6. 前端从开渠票读出 `unsigned_funding_tx` 向 `/api/sign-funding` 提交；API 重启仍使用原会话文件。若签名已完成但响应丢失，相同交易取回已保存结果，再提交广播、等待链上确认并出票。若授权文件丢失或签名结果未保存，必须拒签并新建流程，不能重新放开旧通道的签名。
        - *实测状态*：**未跑（未在 Chrome 手动跑过，全流程由自动化测试模拟覆盖）**。
      - **场景 2：已出 Lightning 发票、尚未支付刷新**
        1. 正常开渠推进到结算弹窗，展示 Lightning Invoice（`lnbcrt...`），订单状态为 `Pending`。
@@ -246,5 +270,5 @@ PoC 已验证底层 Fiber 协议开渠与 SHA-256 支付的可行性。2026-09-2
    - 跨机迁移（device-switch）、Safari/Firefox PRF 支持依然不在当前范围，保持未测状态。
 7. **BTC / CCH 闭环（开发者环境已完成；主网/公网 LND 未做）**：
    - 运营方 FNN 进程内 CCH + 本地 regtest LND 已跑通 hold invoice。用户侧仍是自己的 LND（本机 `lnd-user`），后端不托管 macaroon。
-8. **运营方外部出资开渠（下一步，见 [external-funding-lsp.md](./external-funding-lsp.md)）**：
-   - 停止把可花 CKB 打到用户 secp。用户 WASM 发起 `open_channel_with_external_funding`，`POST /api/sign-funding` 验 tx 后签名，找零回运营方。先 spike 三件事：0 UDT / 运营方出 cWBTC / 用户地址 0 dust；再处理 gift 钱包 UTXO 并发（预拆小 Cell + inflight 拒签 + 重试）。
+8. **运营方外部出资开渠（已实现，见 [external-funding-lsp.md](./external-funding-lsp.md)）**：
+   - 用户 WASM 发起 `open_channel_with_external_funding`，`POST /api/sign-funding` 验 tx 后签名，找零回运营方；预拆小 Cell + inflight 拒签 + 整段重开已实现。下一步验收上述恢复场景，以及 Spend on Fiber 和关闭到 CCC 钱包的真实 testnet 路径。
