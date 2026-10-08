@@ -1,30 +1,37 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { BootstrapSession } from '@ckb-on-ramp/contracts';
 
+// Signing authorization belongs to the durable backend record, not FNN channel status.
+export interface StoredBootstrapSession extends BootstrapSession {
+  funding_request_hash?: string;
+  signed_funding_tx?: unknown;
+}
+
 export interface BootstrapSessionStore {
-  get(sessionId: string): BootstrapSession | undefined;
-  getByChannelId(channelId: string): BootstrapSession | undefined;
-  set(sessionId: string, session: BootstrapSession): void;
+  get(sessionId: string): StoredBootstrapSession | undefined;
+  getByChannelId(channelId: string): StoredBootstrapSession | undefined;
+  set(sessionId: string, session: StoredBootstrapSession): void;
   delete(sessionId: string): void;
   clear(): void;
-  all(): BootstrapSession[];
+  all(): StoredBootstrapSession[];
 }
 
 export class MemoryBootstrapSessionStore implements BootstrapSessionStore {
-  private readonly sessions = new Map<string, BootstrapSession>();
+  private readonly sessions = new Map<string, StoredBootstrapSession>();
   private readonly channelIdToSessionId = new Map<string, string>();
 
-  get(sessionId: string): BootstrapSession | undefined {
+  get(sessionId: string): StoredBootstrapSession | undefined {
     return this.sessions.get(sessionId);
   }
 
-  getByChannelId(channelId: string): BootstrapSession | undefined {
+  getByChannelId(channelId: string): StoredBootstrapSession | undefined {
     const target = channelId.trim().toLowerCase();
     const sessionId = this.channelIdToSessionId.get(target);
     if (sessionId) {
       const s = this.sessions.get(sessionId);
-      if (s) return s;
+      if (s?.channel_id?.trim().toLowerCase() === target) return s;
       this.channelIdToSessionId.delete(target);
     }
     for (const session of this.sessions.values()) {
@@ -36,7 +43,7 @@ export class MemoryBootstrapSessionStore implements BootstrapSessionStore {
     return undefined;
   }
 
-  set(sessionId: string, session: BootstrapSession): void {
+  set(sessionId: string, session: StoredBootstrapSession): void {
     this.sessions.set(sessionId, session);
     if (session.channel_id) {
       this.channelIdToSessionId.set(session.channel_id.trim().toLowerCase(), sessionId);
@@ -56,7 +63,7 @@ export class MemoryBootstrapSessionStore implements BootstrapSessionStore {
     this.channelIdToSessionId.clear();
   }
 
-  all(): BootstrapSession[] {
+  all(): StoredBootstrapSession[] {
     return Array.from(this.sessions.values());
   }
 }
@@ -88,59 +95,56 @@ export class FileBootstrapSessionStore implements BootstrapSessionStore {
   }
 
   private loadFromDisk(): void {
-    try {
-      if (!fs.existsSync(this.filePath)) return;
-      const content = fs.readFileSync(this.filePath, 'utf-8');
-      const list = JSON.parse(content) as BootstrapSession[];
-      if (Array.isArray(list)) {
-        for (const session of list) {
-          if (session && typeof session === 'object' && session.session_id) {
-            this.memory.set(session.session_id, session);
-          }
-        }
+    if (!fs.existsSync(this.filePath)) return;
+    const list: unknown = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
+    if (!Array.isArray(list)) throw new Error('Invalid bootstrap session store');
+    for (const session of list) {
+      if (!session || typeof session !== 'object' || typeof session.session_id !== 'string') {
+        throw new Error('Invalid bootstrap session record');
       }
-    } catch (err) {
-      console.warn(`[FileBootstrapSessionStore] Failed to read sessions from ${this.filePath}:`, err);
+      this.memory.set(session.session_id, session);
     }
   }
 
-  private saveToDisk(): void {
+  private saveToDisk(sessions: StoredBootstrapSession[]): void {
+    const dir = path.dirname(this.filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
     try {
-      const dir = path.dirname(this.filePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      const data = JSON.stringify(this.memory.all(), null, 2);
-      fs.writeFileSync(this.filePath, data, 'utf-8');
-    } catch (err) {
-      console.warn(`[FileBootstrapSessionStore] Failed to persist sessions to ${this.filePath}:`, err);
+      fs.writeFileSync(tempPath, JSON.stringify(sessions, null, 2), { mode: 0o600, flag: 'wx' });
+      fs.renameSync(tempPath, this.filePath);
+    } finally {
+      fs.rmSync(tempPath, { force: true });
     }
   }
 
-  get(sessionId: string): BootstrapSession | undefined {
+  get(sessionId: string): StoredBootstrapSession | undefined {
     return this.memory.get(sessionId);
   }
 
-  getByChannelId(channelId: string): BootstrapSession | undefined {
+  getByChannelId(channelId: string): StoredBootstrapSession | undefined {
     return this.memory.getByChannelId(channelId);
   }
 
-  set(sessionId: string, session: BootstrapSession): void {
+  set(sessionId: string, session: StoredBootstrapSession): void {
+    const sessions = this.memory.all().filter((item) => item.session_id !== sessionId);
+    sessions.push(session);
+    // Commit disk first: a persistence failure must not grant in-memory authorization.
+    this.saveToDisk(sessions);
     this.memory.set(sessionId, session);
-    this.saveToDisk();
   }
 
   delete(sessionId: string): void {
+    this.saveToDisk(this.memory.all().filter((session) => session.session_id !== sessionId));
     this.memory.delete(sessionId);
-    this.saveToDisk();
   }
 
   clear(): void {
+    this.saveToDisk([]);
     this.memory.clear();
-    this.saveToDisk();
   }
 
-  all(): BootstrapSession[] {
+  all(): StoredBootstrapSession[] {
     return this.memory.all();
   }
 }

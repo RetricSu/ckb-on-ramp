@@ -744,7 +744,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
       assert.equal(updated.channel_id, '0x' + 'dd'.repeat(32));
     });
 
-    it('POST /api/sign-funding enforces real session-gate binding and one-time consumption (replay prevention)', async () => {
+    it('POST /api/sign-funding binds authorization to one transaction and retrieves identical retries', async () => {
       const DUMMY_ACCEPTED_CHANNEL_ID = '0x' + 'ab'.repeat(32);
       const mockGateway: CchGateway = {
         createOrder: async () => { throw new Error('not used'); },
@@ -835,7 +835,7 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
         assert.equal(validBody.channel_id, DUMMY_ACCEPTED_CHANNEL_ID);
         assert.deepEqual(validBody.signed_funding_tx.witnesses, ['0xsigned']);
 
-        // 5. Replay with the same channel_id is rejected (session is one-time consumed)
+        // 5. An identical retry retrieves the saved result without new authorization.
         const replayRes = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -844,9 +844,20 @@ describe('Bootstrap Service and Route (Scheme B Phase-1)', () => {
             unsigned_funding_tx: { inputs: [], outputs: [] },
           }),
         });
-        assert.equal(replayRes.status, 400);
+        assert.equal(replayRes.status, 200);
         const replayBody = (await replayRes.json()) as any;
-        assert.match(replayBody.error, /already been signed/);
+        assert.deepEqual(replayBody, validBody);
+
+        const changedRes = await fetch(`http://127.0.0.1:${port}/api/sign-funding`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            channel_id: DUMMY_ACCEPTED_CHANNEL_ID,
+            unsigned_funding_tx: { inputs: [], outputs: [], witnesses: ['0xchanged'] },
+          }),
+        });
+        assert.equal(changedRes.status, 400);
+        assert.match(((await changedRes.json()) as any).error, /different transaction/);
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }

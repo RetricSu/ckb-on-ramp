@@ -46,7 +46,7 @@ npm install
    OPERATOR_CKB_PRIVATE_KEY=<32-byte-hex-private-key>
    ```
 
-   `FNN_RPC_URL` is the API's operator Fiber JSON-RPC endpoint. `CCH_RPC_URL` is the CCH JSON-RPC endpoint; leave it empty when CCH runs in the same FNN process, or set it when CCH is standalone. Both services must belong to the **testnet** operator used by this web flow.
+   `FNN_RPC_URL` is the API's operator Fiber JSON-RPC endpoint. `CCH_RPC_URL` is the CCH JSON-RPC endpoint; leave it empty when CCH runs in the same FNN process, or set it when CCH is standalone. Both services must belong to the **testnet** operator used by this web flow. Standalone CCH also needs `fiber.chain: testnet`. Fiber v0.9.0 requires Bitcoin testnet LND invoices for `Fibt`; the regtest LND in `ops/stack.sh` cannot serve this website path.
 
    `OPERATOR_CKB_PRIVATE_KEY` lets the API sponsor/sign the operator side of testnet channel funding. Use the key for the funded operator wallet; it must be 64 hexadecimal characters, with an optional `0x` prefix. `.env` is gitignored: never put a real private key in `.env.example`, a commit, logs, screenshots, or chat.
 
@@ -61,6 +61,8 @@ npm install
 The browser starts a passkey-backed Fiber WASM node on CKB testnet, uses testnet cWBTC, and creates `Fibt` invoices. `npm run dev` does not start or fund the testnet operator. The operator still needs CKB capacity, cWBTC liquidity, reachable FNN/CCH RPC, and a reachable P2P address.
 
 For public Lightning operation, consumer wallets must be able to pay the BOLT11 invoice, and CCH's LND must be on the public Lightning Network with inbound liquidity. Do not ask users to connect their nodes to the operator.
+
+`CKB_RPC_URL` configures both the API chain client and the same-origin browser RPC proxy. See [the 2026-10-08 live testnet record](docs/testnet-e2e-2026-10-08.md) for actual transactions, the CCH network blocker, and remaining desktop wallet checks.
 
 The development server and production preview supply the COOP/COEP and CSP headers required by Fiber WASM, and proxy the API and public CKB RPC through the same origin. Use the Vite URL while developing; opening built files directly or serving them without those headers will break `SharedArrayBuffer` and WASM startup.
 
@@ -90,6 +92,10 @@ npm run stack:down
 Other defaults are listed in [.env.example](.env.example). `ops/stack.sh` writes a gitignored `ops/runtime.env` and, only when `.env` does not already exist, copies it to `.env`. That generated file is for local stack endpoints; replace it with testnet operator settings before returning to the website path.
 
 `VITE_API_BASE_URL` defaults to the same-origin `/api` path. Production hosting must route that path to the API rather than configuring a cross-origin browser endpoint that CSP will reject.
+
+External-funding authorization and signed results persist in `ops/data/bootstrap-sessions.json` (override with `BOOTSTRAP_STORE_PATH`). Keep this file across API restarts and use one API process per signing wallet. Identical funding requests share a signature and retrieve the saved result after a lost response; a changed transaction is refused. Corrupt/unwritable storage fails closed. Missing session records are never recreated from FNN channel status. If the API stopped after reserving authorization but before saving the signature, let the old pending channel resolve before starting a new bootstrap.
+
+Retries must preserve the original transaction field values, including hex quantity encoding and witnesses. JSON key order and snake/camel field names are normalized; changing `0x0` to `0x00` counts as a different request. Replay the transaction saved in the browser's channel ticket.
 
 ## Common failures
 

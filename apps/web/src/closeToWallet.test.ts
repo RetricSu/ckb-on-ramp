@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import { CWBTC_SCRIPT } from '@ckb-on-ramp/contracts';
 import {
   CLOSE_ERRORS,
+  assertCloseSettlement,
+  waitForShutdownTxHash,
   CLOSE_FEE_RATE,
   L1_SETTLEMENT_COPY,
   assertCanCloseToWallet,
@@ -247,5 +249,42 @@ describe('closeToWallet', () => {
     it('maps peer disconnect to operator-offline copy', () => {
       assert.equal(humanizeCloseError(new Error('peer is not connected')), CLOSE_ERRORS.OPERATOR_OFFLINE);
     });
+  });
+});
+
+describe('operator close recovery and chain proof', () => {
+  const fundingHash = `0x${'44'.repeat(32)}`;
+  const point = `${fundingHash}01000000`;
+  const transaction = () => ({
+    inputs: [{ previous_output: { tx_hash: fundingHash, index: '0x1' } }],
+    outputs: [{ lock: WALLET_LOCK, type: CWBTC_SCRIPT }],
+    outputs_data: ['0x84030000000000000000000000000000'],
+  });
+  const expected = { fundingOutpoint: point, walletLock: WALLET_LOCK, amountRaw: 900n };
+  it('recovers a missing WASM hash after a transient operator failure', async () => {
+    let calls = 0;
+    const hash = await waitForShutdownTxHash({
+      channelId: CHANNEL_ID,
+      node: { listChannels: async () => ({ channels: [] }), shutdownChannel: async () => {} },
+      getOperatorCloseHash: async () => { if (++calls === 1) throw new Error('offline'); return TX_HASH; },
+      sleep: async () => {},
+    });
+    assert.equal(hash, TX_HASH); assert.equal(calls, 2);
+  });
+  it('accepts a committed transaction that consumes the funding cell and pays exactly the wallet', () => {
+    assertCloseSettlement(transaction(), expected);
+    assertCloseSettlement(transaction(), { ...expected, fundingOutpoint: { tx_hash: fundingHash, index: '0x1' } });
+  });
+  for (const [name, change] of [
+    ['wrong funding input', (tx: ReturnType<typeof transaction>) => { tx.inputs[0]!.previous_output.index = '0x0'; }],
+    ['wrong recipient', (tx: ReturnType<typeof transaction>) => { tx.outputs[0]!.lock = NODE_DEFAULT_LOCK; }],
+    ['wrong asset', (tx: ReturnType<typeof transaction>) => { tx.outputs[0]!.type = { ...CWBTC_SCRIPT, args: '0x00' as typeof CWBTC_SCRIPT.args }; }],
+    ['wrong amount', (tx: ReturnType<typeof transaction>) => { tx.outputs_data[0] = '0x83030000000000000000000000000000'; }],
+  ] as const) it(`rejects committed but ${name}`, async () => {
+    const tx = transaction(); change(tx);
+    await assert.rejects(waitForCkbTxCommitted(TX_HASH, {
+      settlement: expected,
+      fetch: async () => new Response(JSON.stringify({ result: { tx_status: { status: 'committed' }, transaction: tx } })),
+    }), { message: CLOSE_ERRORS.REJECTED });
   });
 });

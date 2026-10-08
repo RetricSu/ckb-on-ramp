@@ -10,9 +10,6 @@ import {
 } from './bootstrapStore.js';
 import {
   clearBootstrapSessionsForTest,
-  getBootstrapSession,
-  getBootstrapSessionByChannelId,
-  recoverSessionFromFnn,
   setBootstrapSessionStore,
 } from './bootstrap.js';
 import { createApiRouter } from '../routes/api.js';
@@ -24,6 +21,7 @@ describe('Bootstrap Session Persistence and Recovery', () => {
   let storeFile: string;
 
   beforeEach(() => {
+    setBootstrapSessionStore(new MemoryBootstrapSessionStore());
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bootstrap-test-'));
     storeFile = path.join(tempDir, 'bootstrap-sessions.json');
   });
@@ -66,50 +64,7 @@ describe('Bootstrap Session Persistence and Recovery', () => {
     assert.equal(byChannel.session_id, 'session-persist-1');
   });
 
-  it('recovers session from FNN list_channels on store miss', async () => {
-    const memStore = new MemoryBootstrapSessionStore();
-    setBootstrapSessionStore(memStore);
-
-    const fakeGateway: CchGateway = {
-      createOrder: async () => { throw new Error('unused'); },
-      getOrder: async () => null,
-      health: async () => true,
-      getNodeInfo: async () => ({
-        node_id: '03dfe0e6cc02a21ca3a971bc2fa05474872dc2acb91cc5defeb1f0566888536957',
-        addresses: [],
-        channel_count: 1,
-        peer_count: 1,
-      }),
-      openChannel: async () => ({ channel_id: '0xmock' }),
-      listChannels: async () => ({
-        channels: [
-          {
-            channel_id: '0xrecoveredchannel123',
-            pubkey: '029a8d5bd239bc1d7f85d65dc319022fc5934a41871473d63306b4022ee58c1e09',
-            is_acceptor: true,
-            state: { state_name: 'NegotiatingFunding' },
-          },
-        ],
-      }),
-    };
-
-    // Store is empty; lookup by channelId returns undefined
-    assert.equal(getBootstrapSessionByChannelId('0xrecoveredchannel123'), undefined);
-
-    // Call recoverSessionFromFnn
-    const recovered = await recoverSessionFromFnn('0xrecoveredchannel123', fakeGateway, '100000000');
-    assert.ok(recovered, 'Should recover session from FNN channels');
-    assert.equal(recovered.channel_id, '0xrecoveredchannel123');
-    assert.equal(recovered.status, 'provisioning_liquidity');
-    assert.equal(recovered.funding_amount, '100000000');
-    assert.equal(recovered.signed, false);
-
-    // Session is now stored in activeStore
-    assert.ok(getBootstrapSession(recovered.session_id));
-    assert.equal(getBootstrapSessionByChannelId('0xrecoveredchannel123')?.session_id, recovered.session_id);
-  });
-
-  it('POST /api/sign-funding recovers session from FNN when missing from store after API restart', async () => {
+  it('POST /api/sign-funding refuses to recreate signing authorization from FNN after store loss', async () => {
     // Empty store simulating complete cache loss / miss
     const memStore = new MemoryBootstrapSessionStore();
     setBootstrapSessionStore(memStore);
@@ -193,11 +148,10 @@ describe('Bootstrap Session Persistence and Recovery', () => {
 
     await handler(req, res, () => {});
 
-    assert.equal(responseStatus, 200, `Expected 200, got ${responseStatus}: ${JSON.stringify(responseBody)}`);
-    assert.deepEqual(responseBody, {
-      channel_id: '0xchannelafterrestart',
-      signed_funding_tx: { mockTx: true, operatorSigned: true },
-    });
+    assert.equal(responseStatus, 400);
+    assert.match((responseBody as { error: string }).error, /not associated with an accepted bootstrap session/);
+    assert.equal(signedPayload, null);
+    assert.equal(memStore.all().length, 0);
   });
 
   it('RpcCchGateway.getOrder queries get_cch_order as truth and succeeds with empty in-memory cache', async () => {

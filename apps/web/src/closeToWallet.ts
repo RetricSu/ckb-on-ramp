@@ -43,6 +43,7 @@ export type CccScriptLike = {
 
 export type CloseableChannel = {
   channel_id: string;
+  channel_outpoint?: string | { tx_hash: string; index: string } | null;
   state?: { state_name?: string };
   local_balance?: string;
   offered_tlc_balance?: string;
@@ -229,6 +230,7 @@ export async function waitForShutdownTxHash(options: {
   timeoutMs?: number;
   pollIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  getOperatorCloseHash?: (channelId: string) => Promise<string | null>;
 }): Promise<string> {
   const timeoutMs = options.timeoutMs ?? 120_000;
   const pollIntervalMs = options.pollIntervalMs ?? 2_000;
@@ -246,9 +248,54 @@ export async function waitForShutdownTxHash(options: {
     } catch {
       // ignore transient list errors while polling
     }
+    if (options.getOperatorCloseHash) {
+      try {
+        const hash = await options.getOperatorCloseHash(options.channelId);
+        if (isShutdownTxHash(hash)) return hash;
+      } catch { /* keep polling through transient operator errors */ }
+    }
     await sleep(pollIntervalMs);
   }
   throw new Error(CLOSE_ERRORS.TIMEOUT);
+}
+
+export type CloseSettlement = {
+  fundingOutpoint: string | { tx_hash: string; index: string };
+  walletLock: FiberLockScript;
+  amountRaw: bigint;
+};
+
+/** A reported hash is evidence only after the chain transaction matches this close. */
+export function assertCloseSettlement(tx: unknown, expected: CloseSettlement): void {
+  try {
+    const transaction = tx as {
+      inputs?: Array<{ previous_output?: { tx_hash?: string; index?: string } }>;
+      outputs?: Array<{ lock?: FiberLockScript; type?: FiberLockScript }>;
+      outputs_data?: string[];
+    } | null;
+    const point = expected.fundingOutpoint;
+    const outpoint = typeof point === 'string' ? point.toLowerCase() : null;
+    if (outpoint && !/^0x[0-9a-f]{72}$/.test(outpoint)) throw new Error(CLOSE_ERRORS.REJECTED);
+    const txHash = outpoint ? outpoint.slice(0, 66) : typeof point === 'object' ? point.tx_hash.toLowerCase() : '';
+    const index = outpoint ? BigInt(`0x${outpoint.slice(66).match(/../g)!.reverse().join('')}`)
+      : typeof point === 'object' ? BigInt(point.index) : -1n;
+    if (!/^0x[0-9a-f]{64}$/.test(txHash) || index < 0n || index > 0xffffffffn) throw new Error(CLOSE_ERRORS.REJECTED);
+    const spendsFunding = transaction?.inputs?.some((input) => {
+      try {
+        return input.previous_output?.tx_hash?.toLowerCase() === txHash &&
+          BigInt(input.previous_output.index!) === index;
+      } catch { return false; }
+    });
+    const paysWallet = transaction?.outputs?.some((output, i) => {
+      const data = transaction.outputs_data?.[i];
+      if (!scriptsEqual(output.lock, expected.walletLock) || !scriptsEqual(output.type, CWBTC_SCRIPT) ||
+        !data || !/^0x[0-9a-f]{32}$/i.test(data)) return false;
+      return BigInt(`0x${data.slice(2).match(/../g)!.reverse().join('')}`) === expected.amountRaw;
+    });
+    if (!spendsFunding || !paysWallet) throw new Error(CLOSE_ERRORS.REJECTED);
+  } catch {
+    throw new Error(CLOSE_ERRORS.REJECTED);
+  }
 }
 
 export async function waitForCkbTxCommitted(
@@ -259,6 +306,7 @@ export async function waitForCkbTxCommitted(
     timeoutMs?: number;
     pollIntervalMs?: number;
     sleep?: (ms: number) => Promise<void>;
+    settlement?: CloseSettlement;
   },
 ): Promise<void> {
   const fetchFn = options?.fetch ?? fetch;
@@ -281,11 +329,14 @@ export async function waitForCkbTxCommitted(
         }),
       });
       const payload = (await response.json()) as {
-        result?: { tx_status?: { status?: string } };
+        result?: { tx_status?: { status?: string }; transaction?: unknown };
         error?: { message?: string };
       };
       const status = payload.result?.tx_status?.status;
-      if (status === 'committed') return;
+      if (status === 'committed') {
+        if (options?.settlement) assertCloseSettlement(payload.result?.transaction, options.settlement);
+        return;
+      }
       if (status === 'rejected') {
         throw new Error(CLOSE_ERRORS.REJECTED);
       }
@@ -312,7 +363,8 @@ export async function closeChannelToWallet(options: {
   nodeRunning: boolean;
   node?: CloseChannelNode | null;
   nodeDefaultLock?: FiberLockScript | null;
-  waitForTx?: (txHash: string) => Promise<void>;
+  waitForTx?: (txHash: string, settlement: CloseSettlement) => Promise<void>;
+  getOperatorCloseHash?: (channelId: string) => Promise<string | null>;
   timeoutMs?: number;
   pollIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -352,11 +404,18 @@ export async function closeChannelToWallet(options: {
     timeoutMs: options.timeoutMs,
     pollIntervalMs: options.pollIntervalMs,
     sleep: options.sleep,
+    // A fallback hash must be checked against the funding outpoint on chain.
+    getOperatorCloseHash: options.waitForTx && gated.channel.channel_outpoint
+      ? options.getOperatorCloseHash : undefined,
   });
 
   if (options.waitForTx) {
     try {
-      await options.waitForTx(txHash);
+      await options.waitForTx(txHash, {
+        fundingOutpoint: gated.channel.channel_outpoint ?? '',
+        walletLock: gated.walletLock,
+        amountRaw: parseHexAmount(gated.channel.local_balance),
+      });
     } catch (err) {
       throw new Error(humanizeCloseError(err));
     }
